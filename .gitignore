@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# Secrets
+.env
+.env.*
+
+# Data
+data/raw/
+data/processed/
+!data/sample/
+
+# Experiment artifacts
+results/
+outputs/
+runs/
+artifacts/
+checkpoints/
+
+# Retrieval indexes / models
+indexes/
+faiss_index/
+models/
+*.faiss
+*.index
+
+# Cache
+.cache/
+hf_cache/
