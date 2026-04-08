@@ -11,6 +11,7 @@ import numpy as np
 @dataclass
 class Query:
     text: str
+    answer: Optional[str] = None
 
 
 @dataclass
@@ -327,7 +328,7 @@ def load_hotpotqa_queries(limit: int = 5) -> List[Query]:
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[:{limit}]")
-    return [Query(text=item["question"]) for item in dataset]
+    return [Query(text=item["question"], answer=item["answer"]) for item in dataset]
 
 
 def build_demo_corpus() -> List[RetrievedDocument]:
