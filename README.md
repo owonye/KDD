@@ -68,6 +68,14 @@ This produces:
 
 Results are saved to `results/baseline_results.csv`.
 
+## Result summary
+
+```powershell
+python src/summarize_results.py
+```
+
+This prints average EM, F1, retrieval calls, and document count for each baseline.
+
 ## Current scope
 
 - toy retriever
