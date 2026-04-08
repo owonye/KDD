@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from statistics import mean
-from typing import List
+from typing import List, Optional, Protocol
+
+import numpy as np
 
 
 @dataclass
@@ -17,6 +20,16 @@ class RetrievedDocument:
     retrieval_score: float
     supportiveness_score: float
     embedding: List[float]
+
+
+class Retriever(Protocol):
+    def retrieve(self, query: Query, top_k: int) -> List[RetrievedDocument]:
+        ...
+
+
+class Generator(Protocol):
+    def generate(self, query: Query, evidence: List[RetrievedDocument]) -> str:
+        ...
 
 
 @dataclass
@@ -61,6 +74,87 @@ class SimpleGenerator:
     def generate(self, query: Query, evidence: List[RetrievedDocument]) -> str:
         joined_ids = ", ".join(doc.doc_id for doc in evidence)
         return f"Answer to '{query.text}' based on docs: {joined_ids}"
+
+
+class OpenAIGenerator:
+    """
+    OpenAI API based generator.
+    Requires OPENAI_API_KEY to be set in the environment.
+    """
+
+    def __init__(self, model: str = "gpt-4.1-mini") -> None:
+        from openai import OpenAI
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is not set.")
+
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+
+    def generate(self, query: Query, evidence: List[RetrievedDocument]) -> str:
+        context = "\n\n".join(
+            f"[{doc.doc_id}] {doc.text}" for doc in evidence
+        )
+        prompt = (
+            "Answer the question using only the provided evidence.\n\n"
+            f"Question: {query.text}\n\n"
+            f"Evidence:\n{context}\n\n"
+            "Answer:"
+        )
+        response = self.client.responses.create(
+            model=self.model,
+            input=prompt,
+        )
+        return response.output_text.strip()
+
+
+class FaissRetriever:
+    """
+    FAISS-based dense retriever.
+    Embeddings are produced by a sentence-transformers model.
+    """
+
+    def __init__(self, corpus: List[RetrievedDocument], model_name: str = "BAAI/bge-small-en-v1.5") -> None:
+        import faiss
+        from sentence_transformers import SentenceTransformer
+
+        self.corpus = corpus
+        self.encoder = SentenceTransformer(model_name)
+
+        matrix = np.array([doc.embedding for doc in corpus], dtype="float32")
+        if len(matrix.shape) != 2:
+            raise ValueError("Embeddings must be a 2D matrix.")
+
+        dimension = matrix.shape[1]
+        self.index = faiss.IndexFlatIP(dimension)
+        normalized = self._normalize(matrix)
+        self.index.add(normalized)
+
+    def _normalize(self, matrix: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        return matrix / norms
+
+    def retrieve(self, query: Query, top_k: int) -> List[RetrievedDocument]:
+        query_embedding = self.encoder.encode([query.text], normalize_embeddings=True)
+        scores, indices = self.index.search(np.array(query_embedding, dtype="float32"), top_k)
+
+        results: List[RetrievedDocument] = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < 0:
+                continue
+            doc = self.corpus[idx]
+            results.append(
+                RetrievedDocument(
+                    doc_id=doc.doc_id,
+                    text=doc.text,
+                    retrieval_score=float(score),
+                    supportiveness_score=doc.supportiveness_score,
+                    embedding=doc.embedding,
+                )
+            )
+        return results
 
 
 def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
@@ -136,8 +230,8 @@ class SufficiencyEstimator:
 class StructureAwareAdaptiveRAG:
     def __init__(
         self,
-        retriever: SimpleRetriever,
-        generator: SimpleGenerator,
+        retriever: Retriever,
+        generator: Generator,
         estimator: SufficiencyEstimator,
         initial_k: int = 3,
         expanded_k: int = 5,
@@ -174,6 +268,66 @@ class StructureAwareAdaptiveRAG:
             "sufficiency_score": decision.sufficiency_score,
             "answer": answer,
         }
+
+
+def embed_corpus_texts(
+    raw_docs: List[dict],
+    model_name: str = "BAAI/bge-small-en-v1.5",
+) -> List[RetrievedDocument]:
+    from sentence_transformers import SentenceTransformer
+
+    encoder = SentenceTransformer(model_name)
+    texts = [doc["text"] for doc in raw_docs]
+    embeddings = encoder.encode(texts, normalize_embeddings=True)
+
+    corpus: List[RetrievedDocument] = []
+    for raw_doc, embedding in zip(raw_docs, embeddings):
+        corpus.append(
+            RetrievedDocument(
+                doc_id=raw_doc["doc_id"],
+                text=raw_doc["text"],
+                retrieval_score=float(raw_doc.get("retrieval_score", 0.0)),
+                supportiveness_score=float(raw_doc.get("supportiveness_score", 0.5)),
+                embedding=list(embedding),
+            )
+        )
+    return corpus
+
+
+def load_hotpotqa_sample(limit: int = 50) -> List[dict]:
+    from datasets import load_dataset
+
+    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[:{limit}]")
+
+    raw_docs: List[dict] = []
+    seen_ids = set()
+    for item_idx, item in enumerate(dataset):
+        contexts = item["context"]
+        titles = contexts["title"]
+        sentences = contexts["sentences"]
+        for passage_idx, (title, sentence_list) in enumerate(zip(titles, sentences)):
+            doc_id = f"{item_idx}_{passage_idx}_{title}"
+            if doc_id in seen_ids:
+                continue
+            seen_ids.add(doc_id)
+            text = " ".join(sentence_list)
+            if not text.strip():
+                continue
+            raw_docs.append(
+                {
+                    "doc_id": doc_id,
+                    "text": f"{title}. {text}",
+                    "supportiveness_score": 0.5,
+                }
+            )
+    return raw_docs
+
+
+def load_hotpotqa_queries(limit: int = 5) -> List[Query]:
+    from datasets import load_dataset
+
+    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[:{limit}]")
+    return [Query(text=item["question"]) for item in dataset]
 
 
 def build_demo_corpus() -> List[RetrievedDocument]:

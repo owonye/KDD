@@ -1,6 +1,8 @@
 from .pipeline import (
     DecisionResult,
     EvidenceFeatures,
+    FaissRetriever,
+    OpenAIGenerator,
     Query,
     RetrievedDocument,
     SimpleGenerator,
@@ -8,12 +10,17 @@ from .pipeline import (
     StructureAwareAdaptiveRAG,
     SufficiencyEstimator,
     build_demo_corpus,
+    embed_corpus_texts,
     extract_evidence_features,
+    load_hotpotqa_queries,
+    load_hotpotqa_sample,
 )
 
 __all__ = [
     "DecisionResult",
     "EvidenceFeatures",
+    "FaissRetriever",
+    "OpenAIGenerator",
     "Query",
     "RetrievedDocument",
     "SimpleGenerator",
@@ -21,5 +28,8 @@ __all__ = [
     "StructureAwareAdaptiveRAG",
     "SufficiencyEstimator",
     "build_demo_corpus",
+    "embed_corpus_texts",
     "extract_evidence_features",
+    "load_hotpotqa_queries",
+    "load_hotpotqa_sample",
 ]
