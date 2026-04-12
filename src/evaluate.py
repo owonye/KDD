@@ -116,8 +116,13 @@ def run_fixed_large_k(query: Query, retriever, generator, top_k: int = 5) -> dic
 def run_confidence_baseline(query: Query, retriever, generator, initial_k: int = 3, expanded_k: int = 5, threshold: float = 0.88) -> dict[str, Any]:
     initial_docs = retriever.retrieve(query, top_k=initial_k)
     avg_score = sum(doc.retrieval_score for doc in initial_docs) / max(len(initial_docs), 1)
+    top1_score = initial_docs[0].retrieval_score if initial_docs else 0.0
+    top2_score = initial_docs[1].retrieval_score if len(initial_docs) > 1 else 0.0
+    score_gap = top1_score - top2_score
 
-    if avg_score >= threshold:
+    confidence_score = 0.5 * top1_score + 0.4 * avg_score + 0.1 * score_gap
+
+    if confidence_score >= threshold:
         answer = generator.generate(query, initial_docs)
         return {
             "baseline": "confidence_adaptive_rag",
@@ -126,7 +131,7 @@ def run_confidence_baseline(query: Query, retriever, generator, initial_k: int =
             "used_docs": [doc.doc_id for doc in initial_docs],
             "retrieval_calls": 1,
             "doc_count": len(initial_docs),
-            "sufficiency_score": avg_score,
+            "sufficiency_score": confidence_score,
             "answer": answer,
         }
 
@@ -139,7 +144,7 @@ def run_confidence_baseline(query: Query, retriever, generator, initial_k: int =
         "used_docs": [doc.doc_id for doc in expanded_docs],
         "retrieval_calls": 2,
         "doc_count": len(expanded_docs),
-        "sufficiency_score": avg_score,
+        "sufficiency_score": confidence_score,
         "answer": answer,
     }
 
