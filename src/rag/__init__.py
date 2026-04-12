@@ -14,6 +14,8 @@ from .pipeline import (
     extract_evidence_features,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
+    load_nq_queries,
+    load_nq_sample,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "extract_evidence_features",
     "load_hotpotqa_queries",
     "load_hotpotqa_sample",
+    "load_nq_queries",
+    "load_nq_sample",
 ]

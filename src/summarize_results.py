@@ -28,6 +28,7 @@ def main() -> None:
             "doc_count_sum": 0.0,
         }
     )
+    reason_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
     with input_path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -38,6 +39,9 @@ def main() -> None:
             grouped[name]["f1_sum"] += safe_float(row.get("f1", "0"))
             grouped[name]["retrieval_calls_sum"] += safe_float(row.get("retrieval_calls", "0"))
             grouped[name]["doc_count_sum"] += safe_float(row.get("doc_count", "0"))
+            reason = row.get("reason", "")
+            if reason:
+                reason_counts[name][reason] += 1
 
     print("=== Baseline Summary ===")
     print(f"{'baseline':30} {'n':>4} {'EM':>8} {'F1':>8} {'calls':>8} {'docs':>8}")
@@ -51,6 +55,11 @@ def main() -> None:
             f"{name:30} {int(count):4d} "
             f"{avg_em:8.3f} {avg_f1:8.3f} {avg_calls:8.3f} {avg_docs:8.3f}"
         )
+
+    print("\n=== Reason Counts ===")
+    for name, counts in reason_counts.items():
+        joined = ", ".join(f"{reason}: {count}" for reason, count in sorted(counts.items()))
+        print(f"{name}: {joined}")
 
 
 if __name__ == "__main__":

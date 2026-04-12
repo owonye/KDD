@@ -31,7 +31,13 @@ python src/main.py --mode demo
 python src/main.py --mode hotpotqa
 ```
 
-### 3. HotpotQA + FAISS + OpenAI generator
+### 3. Natural Questions + FAISS mode
+
+```powershell
+python src/main.py --mode nq
+```
+
+### 4. Dataset mode + OpenAI generator
 
 Set your API key first:
 
@@ -59,6 +65,18 @@ or
 python src/evaluate.py --mode hotpotqa
 ```
 
+or
+
+```powershell
+python src/evaluate.py --mode nq
+```
+
+You can also change retrieval budget:
+
+```powershell
+python src/evaluate.py --mode hotpotqa --initial-k 3 --expanded-k 5
+```
+
 This produces:
 
 - `vanilla_rag`
@@ -74,7 +92,12 @@ Results are saved to `results/baseline_results.csv`.
 python src/summarize_results.py
 ```
 
-This prints average EM, F1, retrieval calls, and document count for each baseline.
+This prints:
+
+- average EM and F1
+- average retrieval calls
+- average document count
+- reason counts for each baseline
 
 ## Current scope
 
@@ -92,5 +115,5 @@ This prints average EM, F1, retrieval calls, and document count for each baselin
 ## Notes
 
 - `demo` mode runs without external downloads.
-- `hotpotqa` mode downloads the dataset and embedding model on first run.
+- `hotpotqa` and `nq` modes download the dataset and embedding model on first run.
 - `--use-openai` requires `OPENAI_API_KEY`.

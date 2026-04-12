@@ -384,6 +384,45 @@ def load_hotpotqa_queries(limit: int = 5) -> List[Query]:
     return [Query(text=item["question"], answer=item["answer"]) for item in dataset]
 
 
+def load_nq_sample(limit: int = 50) -> List[dict]:
+    from datasets import load_dataset
+
+    dataset = load_dataset("natural_questions", split=f"validation[:{limit}]")
+
+    raw_docs: List[dict] = []
+    for item_idx, item in enumerate(dataset):
+        question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
+        doc_text = item.get("document", {}).get("text", "") if isinstance(item.get("document"), dict) else item.get("document", "")
+        if not doc_text:
+            continue
+        raw_docs.append(
+            {
+                "doc_id": f"nq_{item_idx}",
+                "text": doc_text,
+                "supportiveness_score": 0.5,
+                "question_hint": question_text,
+            }
+        )
+    return raw_docs
+
+
+def load_nq_queries(limit: int = 5) -> List[Query]:
+    from datasets import load_dataset
+
+    dataset = load_dataset("natural_questions", split=f"validation[:{limit}]")
+    queries: List[Query] = []
+    for item in dataset:
+        question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
+        answers = item.get("annotations", {}).get("short_answers", []) if isinstance(item.get("annotations"), dict) else []
+        answer_text = None
+        if answers:
+            first_answer = answers[0]
+            if isinstance(first_answer, dict):
+                answer_text = first_answer.get("text")
+        queries.append(Query(text=question_text, answer=answer_text))
+    return queries
+
+
 def build_demo_corpus() -> List[RetrievedDocument]:
     return [
         RetrievedDocument(

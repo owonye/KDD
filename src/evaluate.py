@@ -16,6 +16,8 @@ from rag.pipeline import (
     embed_corpus_texts,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
+    load_nq_queries,
+    load_nq_sample,
 )
 
 
@@ -25,10 +27,16 @@ def build_resources(args: argparse.Namespace):
         queries = [Query("When is the birthday of Michael Phelps?", answer="June 30, 1985")]
         simple_retriever = SimpleRetriever(corpus)
         faiss_retriever = simple_retriever
-    else:
+    elif args.mode == "hotpotqa":
         raw_docs = load_hotpotqa_sample(limit=args.doc_limit)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
         queries = load_hotpotqa_queries(limit=args.query_limit)
+        simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
+        faiss_retriever = simple_retriever
+    else:
+        raw_docs = load_nq_sample(limit=args.doc_limit)
+        corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
+        queries = load_nq_queries(limit=args.query_limit)
         simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
         faiss_retriever = simple_retriever
 
@@ -123,7 +131,14 @@ def run_fixed_large_k(query: Query, retriever, generator, top_k: int = 5) -> dic
     }
 
 
-def run_confidence_baseline(query: Query, retriever, generator, initial_k: int = 3, expanded_k: int = 5, threshold: float = 0.88) -> dict[str, Any]:
+def run_confidence_baseline(
+    query: Query,
+    retriever,
+    generator,
+    initial_k: int = 3,
+    expanded_k: int = 5,
+    threshold: float = 0.88,
+) -> dict[str, Any]:
     initial_docs = retriever.retrieve(query, top_k=initial_k)
     avg_score = sum(doc.retrieval_score for doc in initial_docs) / max(len(initial_docs), 1)
     top1_score = initial_docs[0].retrieval_score if initial_docs else 0.0
@@ -169,13 +184,13 @@ def run_confidence_baseline(query: Query, retriever, generator, initial_k: int =
     }
 
 
-def run_structure_aware(query: Query, retriever, generator) -> dict[str, Any]:
+def run_structure_aware(query: Query, retriever, generator, initial_k: int = 3, expanded_k: int = 5) -> dict[str, Any]:
     pipeline = StructureAwareAdaptiveRAG(
         retriever=retriever,
         generator=generator,
         estimator=SufficiencyEstimator(),
-        initial_k=3,
-        expanded_k=5,
+        initial_k=initial_k,
+        expanded_k=expanded_k,
     )
     result = pipeline.answer(query)
     retrieval_calls = 1 if result["decision"] == "answer_now" else 2
@@ -229,12 +244,15 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["demo", "hotpotqa"], default="demo")
+    parser.add_argument("--mode", choices=["demo", "hotpotqa", "nq"], default="demo")
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-limit", type=int, default=50)
     parser.add_argument("--query-limit", type=int, default=5)
+    parser.add_argument("--initial-k", type=int, default=3)
+    parser.add_argument("--expanded-k", type=int, default=5)
+    parser.add_argument("--confidence-threshold", type=float, default=0.88)
     parser.add_argument("--output", default="results/baseline_results.csv")
     args = parser.parse_args()
 
@@ -242,10 +260,33 @@ def main() -> None:
 
     rows: list[dict[str, Any]] = []
     for query in queries:
-        rows.append(add_metrics(run_vanilla(query, simple_retriever, generator), query))
-        rows.append(add_metrics(run_fixed_large_k(query, simple_retriever, generator), query))
-        rows.append(add_metrics(run_confidence_baseline(query, simple_retriever, generator), query))
-        rows.append(add_metrics(run_structure_aware(query, simple_retriever, generator), query))
+        rows.append(add_metrics(run_vanilla(query, simple_retriever, generator, top_k=args.initial_k), query))
+        rows.append(add_metrics(run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k), query))
+        rows.append(
+            add_metrics(
+                run_confidence_baseline(
+                    query,
+                    simple_retriever,
+                    generator,
+                    initial_k=args.initial_k,
+                    expanded_k=args.expanded_k,
+                    threshold=args.confidence_threshold,
+                ),
+                query,
+            )
+        )
+        rows.append(
+            add_metrics(
+                run_structure_aware(
+                    query,
+                    simple_retriever,
+                    generator,
+                    initial_k=args.initial_k,
+                    expanded_k=args.expanded_k,
+                ),
+                query,
+            )
+        )
 
     output_path = Path(args.output)
     write_results(rows, output_path)
