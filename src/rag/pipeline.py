@@ -38,7 +38,7 @@ class Generator(Protocol):
 class EvidenceFeatures:
     relevance: float
     redundancy: float
-    diversity: float
+    coverage: float
     supportiveness: float
 
 
@@ -47,6 +47,7 @@ class DecisionResult:
     features: EvidenceFeatures
     sufficiency_score: float
     sufficient: bool
+    reason: str
 
 
 class SimpleRetriever:
@@ -215,12 +216,12 @@ def extract_evidence_features(query: Query, docs: List[RetrievedDocument]) -> Ev
 
     pairwise_sims = compute_pairwise_similarities(docs)
     redundancy = mean(pairwise_sims) if pairwise_sims else 0.0
-    diversity = 1.0 - redundancy
+    coverage = 1.0 - redundancy
 
     return EvidenceFeatures(
         relevance=relevance,
         redundancy=redundancy,
-        diversity=diversity,
+        coverage=coverage,
         supportiveness=supportiveness,
     )
 
@@ -234,28 +235,47 @@ class SufficiencyEstimator:
     def __init__(
         self,
         relevance_weight: float = 0.35,
-        diversity_weight: float = 0.20,
+        coverage_weight: float = 0.20,
         supportiveness_weight: float = 0.35,
         redundancy_weight: float = 0.20,
         threshold: float = 0.55,
+        redundancy_threshold: float = 0.85,
+        coverage_threshold: float = 0.25,
+        supportiveness_threshold: float = 0.45,
     ) -> None:
         self.relevance_weight = relevance_weight
-        self.diversity_weight = diversity_weight
+        self.coverage_weight = coverage_weight
         self.supportiveness_weight = supportiveness_weight
         self.redundancy_weight = redundancy_weight
         self.threshold = threshold
+        self.redundancy_threshold = redundancy_threshold
+        self.coverage_threshold = coverage_threshold
+        self.supportiveness_threshold = supportiveness_threshold
+
+    def _infer_reason(self, features: EvidenceFeatures, sufficient: bool) -> str:
+        if sufficient:
+            return "answer_sufficient"
+        if features.redundancy >= self.redundancy_threshold:
+            return "high_redundancy"
+        if features.coverage <= self.coverage_threshold:
+            return "low_coverage"
+        if features.supportiveness <= self.supportiveness_threshold:
+            return "weak_supportiveness"
+        return "mixed_insufficiency"
 
     def predict(self, features: EvidenceFeatures) -> DecisionResult:
         score = (
             self.relevance_weight * features.relevance
-            + self.diversity_weight * features.diversity
+            + self.coverage_weight * features.coverage
             + self.supportiveness_weight * features.supportiveness
             - self.redundancy_weight * features.redundancy
         )
+        sufficient = score >= self.threshold
         return DecisionResult(
             features=features,
             sufficiency_score=score,
-            sufficient=score >= self.threshold,
+            sufficient=sufficient,
+            reason=self._infer_reason(features, sufficient),
         )
 
 
@@ -284,6 +304,7 @@ class StructureAwareAdaptiveRAG:
             return {
                 "query": query.text,
                 "decision": "answer_now",
+                "reason": decision.reason,
                 "used_docs": [doc.doc_id for doc in initial_docs],
                 "features": decision.features,
                 "sufficiency_score": decision.sufficiency_score,
@@ -295,6 +316,7 @@ class StructureAwareAdaptiveRAG:
         return {
             "query": query.text,
             "decision": "retrieve_more",
+            "reason": decision.reason,
             "used_docs": [doc.doc_id for doc in expanded_docs],
             "features": decision.features,
             "sufficiency_score": decision.sufficiency_score,
