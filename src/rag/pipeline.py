@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from statistics import mean
 from typing import List, Optional, Protocol
@@ -19,8 +20,8 @@ class RetrievedDocument:
     doc_id: str
     text: str
     retrieval_score: float
-    supportiveness_score: float
     embedding: List[float]
+    supportiveness_score: float = 0.5
 
 
 class Retriever(Protocol):
@@ -175,12 +176,42 @@ def compute_pairwise_similarities(docs: List[RetrievedDocument]) -> List[float]:
     return similarities
 
 
-def extract_evidence_features(docs: List[RetrievedDocument]) -> EvidenceFeatures:
+def normalize_text(text: str) -> List[str]:
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return [token for token in text.split() if token]
+
+
+def compute_query_overlap(query: Query, doc: RetrievedDocument) -> float:
+    query_tokens = set(normalize_text(query.text))
+    doc_tokens = set(normalize_text(doc.text))
+    if not query_tokens or not doc_tokens:
+        return 0.0
+    overlap = len(query_tokens & doc_tokens)
+    return overlap / len(query_tokens)
+
+
+def estimate_supportiveness(query: Query, docs: List[RetrievedDocument]) -> float:
+    if not docs:
+        return 0.0
+
+    scores: List[float] = []
+    for doc in docs:
+        overlap_score = compute_query_overlap(query, doc)
+        blended_score = 0.6 * overlap_score + 0.4 * doc.retrieval_score
+        if doc.supportiveness_score != 0.5:
+            blended_score = 0.5 * blended_score + 0.5 * doc.supportiveness_score
+        scores.append(blended_score)
+    return mean(scores)
+
+
+def extract_evidence_features(query: Query, docs: List[RetrievedDocument]) -> EvidenceFeatures:
     if not docs:
         return EvidenceFeatures(0.0, 1.0, 0.0, 0.0)
 
     relevance = mean(doc.retrieval_score for doc in docs)
-    supportiveness = mean(doc.supportiveness_score for doc in docs)
+    supportiveness = estimate_supportiveness(query, docs)
 
     pairwise_sims = compute_pairwise_similarities(docs)
     redundancy = mean(pairwise_sims) if pairwise_sims else 0.0
@@ -245,7 +276,7 @@ class StructureAwareAdaptiveRAG:
 
     def answer(self, query: Query) -> dict:
         initial_docs = self.retriever.retrieve(query, top_k=self.initial_k)
-        initial_features = extract_evidence_features(initial_docs)
+        initial_features = extract_evidence_features(query, initial_docs)
         decision = self.estimator.predict(initial_features)
 
         if decision.sufficient:
