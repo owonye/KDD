@@ -1,4 +1,6 @@
 import argparse
+import json
+from pathlib import Path
 
 from rag.pipeline import (
     FaissRetriever,
@@ -15,6 +17,26 @@ from rag.pipeline import (
     load_nq_queries,
     load_nq_sample,
 )
+
+
+def load_estimator(args: argparse.Namespace) -> SufficiencyEstimator:
+    estimator = SufficiencyEstimator()
+    if not args.calibration_file:
+        return estimator
+
+    calibration_path = Path(args.calibration_file).resolve()
+    if not calibration_path.exists():
+        raise FileNotFoundError(f"Calibration file not found: {calibration_path}")
+
+    config = json.loads(calibration_path.read_text(encoding="utf-8"))
+    estimator.update_parameters(
+        relevance_weight=config["relevance_weight"],
+        coverage_weight=config["coverage_weight"],
+        supportiveness_weight=config["supportiveness_weight"],
+        redundancy_weight=config["redundancy_weight"],
+        threshold=config["threshold"],
+    )
+    return estimator
 
 
 def build_pipeline(args: argparse.Namespace) -> tuple[StructureAwareAdaptiveRAG, Query]:
@@ -39,7 +61,7 @@ def build_pipeline(args: argparse.Namespace) -> tuple[StructureAwareAdaptiveRAG,
     if args.use_openai:
         generator = OpenAIGenerator(model=args.openai_model)
 
-    estimator = SufficiencyEstimator()
+    estimator = load_estimator(args)
 
     pipeline = StructureAwareAdaptiveRAG(
         retriever=retriever,
@@ -62,6 +84,7 @@ def main() -> None:
     parser.add_argument("--query-limit", type=int, default=5)
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
+    parser.add_argument("--calibration-file", default="")
     args = parser.parse_args()
 
     pipeline, query = build_pipeline(args)

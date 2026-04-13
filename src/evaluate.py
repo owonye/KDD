@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,26 @@ def add_metrics(row: dict[str, Any], query: Query) -> dict[str, Any]:
         row["exact_match"] = None
         row["f1"] = None
     return row
+
+
+def load_estimator(args: argparse.Namespace) -> SufficiencyEstimator:
+    estimator = SufficiencyEstimator()
+    if not args.calibration_file:
+        return estimator
+
+    calibration_path = Path(args.calibration_file).resolve()
+    if not calibration_path.exists():
+        raise FileNotFoundError(f"Calibration file not found: {calibration_path}")
+
+    config = json.loads(calibration_path.read_text(encoding="utf-8"))
+    estimator.update_parameters(
+        relevance_weight=config["relevance_weight"],
+        coverage_weight=config["coverage_weight"],
+        supportiveness_weight=config["supportiveness_weight"],
+        redundancy_weight=config["redundancy_weight"],
+        threshold=config["threshold"],
+    )
+    return estimator
 
 
 def run_vanilla(query: Query, retriever, generator, top_k: int = 3) -> dict[str, Any]:
@@ -184,11 +205,11 @@ def run_confidence_baseline(
     }
 
 
-def run_structure_aware(query: Query, retriever, generator, initial_k: int = 3, expanded_k: int = 5) -> dict[str, Any]:
+def run_structure_aware(query: Query, retriever, generator, estimator, initial_k: int = 3, expanded_k: int = 5) -> dict[str, Any]:
     pipeline = StructureAwareAdaptiveRAG(
         retriever=retriever,
         generator=generator,
-        estimator=SufficiencyEstimator(),
+        estimator=estimator,
         initial_k=initial_k,
         expanded_k=expanded_k,
     )
@@ -253,10 +274,12 @@ def main() -> None:
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
+    parser.add_argument("--calibration-file", default="")
     parser.add_argument("--output", default="results/baseline_results.csv")
     args = parser.parse_args()
 
     _, queries, simple_retriever, _, generator = build_resources(args)
+    estimator = load_estimator(args)
 
     rows: list[dict[str, Any]] = []
     for query in queries:
@@ -281,6 +304,7 @@ def main() -> None:
                     query,
                     simple_retriever,
                     generator,
+                    estimator,
                     initial_k=args.initial_k,
                     expanded_k=args.expanded_k,
                 ),

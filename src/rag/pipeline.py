@@ -184,6 +184,16 @@ def normalize_text(text: str) -> List[str]:
     return [token for token in text.split() if token]
 
 
+def min_max_normalize(values: List[float]) -> List[float]:
+    if not values:
+        return []
+    min_v = min(values)
+    max_v = max(values)
+    if max_v == min_v:
+        return [1.0 for _ in values]
+    return [(value - min_v) / (max_v - min_v) for value in values]
+
+
 def compute_query_overlap(query: Query, doc: RetrievedDocument) -> float:
     query_tokens = set(normalize_text(query.text))
     doc_tokens = set(normalize_text(doc.text))
@@ -193,30 +203,63 @@ def compute_query_overlap(query: Query, doc: RetrievedDocument) -> float:
     return overlap / len(query_tokens)
 
 
-def estimate_supportiveness(query: Query, docs: List[RetrievedDocument]) -> float:
+def extract_question_aspects(query: Query) -> List[str]:
+    tokens = normalize_text(query.text)
+    stopwords = {
+        "what", "when", "where", "who", "which", "why", "how", "is", "are", "was",
+        "were", "the", "a", "an", "of", "in", "on", "for", "to", "did", "do", "does",
+    }
+    filtered = [token for token in tokens if token not in stopwords]
+    if not filtered:
+        return tokens[:3]
+    return filtered
+
+
+def compute_aspect_document_similarity(aspect: str, doc: RetrievedDocument) -> float:
+    doc_tokens = set(normalize_text(doc.text))
+    if not doc_tokens:
+        return 0.0
+    return 1.0 if aspect in doc_tokens else 0.0
+
+
+def estimate_coverage(query: Query, docs: List[RetrievedDocument]) -> float:
+    aspects = extract_question_aspects(query)
+    if not aspects or not docs:
+        return 0.0
+
+    scores: List[float] = []
+    for aspect in aspects:
+        best = max(compute_aspect_document_similarity(aspect, doc) for doc in docs)
+        scores.append(best)
+    return mean(scores)
+
+
+def estimate_supportiveness(query: Query, docs: List[RetrievedDocument], normalized_scores: List[float]) -> float:
     if not docs:
         return 0.0
 
     scores: List[float] = []
-    for doc in docs:
+    for doc, normalized_score in zip(docs, normalized_scores):
         overlap_score = compute_query_overlap(query, doc)
-        blended_score = 0.6 * overlap_score + 0.4 * doc.retrieval_score
+        blended_score = 0.5 * normalized_score + 0.5 * overlap_score
         if doc.supportiveness_score != 0.5:
             blended_score = 0.5 * blended_score + 0.5 * doc.supportiveness_score
         scores.append(blended_score)
-    return mean(scores)
+    return max(scores) if scores else 0.0
 
 
 def extract_evidence_features(query: Query, docs: List[RetrievedDocument]) -> EvidenceFeatures:
     if not docs:
         return EvidenceFeatures(0.0, 1.0, 0.0, 0.0)
 
-    relevance = mean(doc.retrieval_score for doc in docs)
-    supportiveness = estimate_supportiveness(query, docs)
+    raw_scores = [doc.retrieval_score for doc in docs]
+    normalized_scores = min_max_normalize(raw_scores)
+    relevance = mean(normalized_scores)
+    supportiveness = estimate_supportiveness(query, docs, normalized_scores)
 
     pairwise_sims = compute_pairwise_similarities(docs)
     redundancy = mean(pairwise_sims) if pairwise_sims else 0.0
-    coverage = 1.0 - redundancy
+    coverage = estimate_coverage(query, docs)
 
     return EvidenceFeatures(
         relevance=relevance,
@@ -277,6 +320,20 @@ class SufficiencyEstimator:
             sufficient=sufficient,
             reason=self._infer_reason(features, sufficient),
         )
+
+    def update_parameters(
+        self,
+        relevance_weight: float,
+        coverage_weight: float,
+        supportiveness_weight: float,
+        redundancy_weight: float,
+        threshold: float,
+    ) -> None:
+        self.relevance_weight = relevance_weight
+        self.coverage_weight = coverage_weight
+        self.supportiveness_weight = supportiveness_weight
+        self.redundancy_weight = redundancy_weight
+        self.threshold = threshold
 
 
 class StructureAwareAdaptiveRAG:
@@ -461,3 +518,11 @@ def build_demo_corpus() -> List[RetrievedDocument]:
             embedding=[0.55, 0.5, 0.2],
         ),
     ]
+
+
+def build_silver_label(initial_correct: bool, expanded_correct: bool) -> int:
+    if initial_correct:
+        return 1
+    if expanded_correct:
+        return 0
+    return 0

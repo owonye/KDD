@@ -86,6 +86,20 @@ This produces:
 
 Results are saved to `results/baseline_results.csv`.
 
+## Calibration
+
+You can calibrate the sufficiency estimator with lightweight silver labels:
+
+```powershell
+python src/calibrate.py --mode hotpotqa --output results/calibration_hotpotqa.json
+```
+
+Then reuse the calibrated weights:
+
+```powershell
+python src/evaluate.py --mode hotpotqa --calibration-file .\results\calibration_hotpotqa.json
+```
+
 ## Result summary
 
 ```powershell
