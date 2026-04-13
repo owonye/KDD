@@ -205,13 +205,22 @@ def run_confidence_baseline(
     }
 
 
-def run_structure_aware(query: Query, retriever, generator, estimator, initial_k: int = 3, expanded_k: int = 5) -> dict[str, Any]:
+def run_structure_aware(
+    query: Query,
+    retriever,
+    generator,
+    estimator,
+    initial_k: int = 3,
+    expanded_k: int = 5,
+    aspect_model: str = "BAAI/bge-small-en-v1.5",
+) -> dict[str, Any]:
     pipeline = StructureAwareAdaptiveRAG(
         retriever=retriever,
         generator=generator,
         estimator=estimator,
         initial_k=initial_k,
         expanded_k=expanded_k,
+        aspect_model=aspect_model,
     )
     result = pipeline.answer(query)
     retrieval_calls = 1 if result["decision"] == "answer_now" else 2
@@ -307,6 +316,7 @@ def main() -> None:
                     estimator,
                     initial_k=args.initial_k,
                     expanded_k=args.expanded_k,
+                    aspect_model=args.embedding_model,
                 ),
                 query,
             )

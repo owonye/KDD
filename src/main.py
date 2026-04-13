@@ -69,6 +69,7 @@ def build_pipeline(args: argparse.Namespace) -> tuple[StructureAwareAdaptiveRAG,
         estimator=estimator,
         initial_k=args.initial_k,
         expanded_k=args.expanded_k,
+        aspect_model=args.embedding_model,
     )
 
     return pipeline, query

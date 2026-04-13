@@ -208,28 +208,60 @@ def extract_question_aspects(query: Query) -> List[str]:
     stopwords = {
         "what", "when", "where", "who", "which", "why", "how", "is", "are", "was",
         "were", "the", "a", "an", "of", "in", "on", "for", "to", "did", "do", "does",
+        "and", "or", "with", "by", "from", "as", "at",
     }
     filtered = [token for token in tokens if token not in stopwords]
-    if not filtered:
+
+    # Add simple bigrams to capture lightweight aspect phrases.
+    bigrams = [" ".join(pair) for pair in zip(filtered, filtered[1:])]
+
+    # Capture capitalized tokens from the original query (lightweight entity hint).
+    capitalized = re.findall(r"\b[A-Z][a-zA-Z]+\b", query.text)
+
+    aspects = list(dict.fromkeys(filtered + bigrams + capitalized))
+    if not aspects:
         return tokens[:3]
-    return filtered
+    return aspects
 
 
-def compute_aspect_document_similarity(aspect: str, doc: RetrievedDocument) -> float:
-    doc_tokens = set(normalize_text(doc.text))
-    if not doc_tokens:
-        return 0.0
-    return 1.0 if aspect in doc_tokens else 0.0
+_ASPECT_ENCODER = None
 
 
-def estimate_coverage(query: Query, docs: List[RetrievedDocument]) -> float:
+def get_aspect_encoder(model_name: str):
+    global _ASPECT_ENCODER
+    if _ASPECT_ENCODER is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            _ASPECT_ENCODER = SentenceTransformer(model_name)
+        except Exception:
+            _ASPECT_ENCODER = False
+    return _ASPECT_ENCODER
+
+
+def compute_aspect_document_similarity(aspect: str, doc: RetrievedDocument, encoder=None) -> float:
+    if encoder is None:
+        doc_tokens = set(normalize_text(doc.text))
+        if not doc_tokens:
+            return 0.0
+        return 1.0 if aspect in doc_tokens else 0.0
+
+    aspect_vec = encoder.encode([aspect], normalize_embeddings=True)[0]
+    return float(np.dot(aspect_vec, np.array(doc.embedding)))
+
+
+def estimate_coverage(query: Query, docs: List[RetrievedDocument], model_name: str = "BAAI/bge-small-en-v1.5") -> float:
     aspects = extract_question_aspects(query)
     if not aspects or not docs:
         return 0.0
 
+    encoder = get_aspect_encoder(model_name)
+    if encoder is False:
+        encoder = None
+
     scores: List[float] = []
     for aspect in aspects:
-        best = max(compute_aspect_document_similarity(aspect, doc) for doc in docs)
+        best = max(compute_aspect_document_similarity(aspect, doc, encoder=encoder) for doc in docs)
         scores.append(best)
     return mean(scores)
 
@@ -248,7 +280,7 @@ def estimate_supportiveness(query: Query, docs: List[RetrievedDocument], normali
     return max(scores) if scores else 0.0
 
 
-def extract_evidence_features(query: Query, docs: List[RetrievedDocument]) -> EvidenceFeatures:
+def extract_evidence_features(query: Query, docs: List[RetrievedDocument], aspect_model: str = "BAAI/bge-small-en-v1.5") -> EvidenceFeatures:
     if not docs:
         return EvidenceFeatures(0.0, 1.0, 0.0, 0.0)
 
@@ -259,7 +291,7 @@ def extract_evidence_features(query: Query, docs: List[RetrievedDocument]) -> Ev
 
     pairwise_sims = compute_pairwise_similarities(docs)
     redundancy = mean(pairwise_sims) if pairwise_sims else 0.0
-    coverage = estimate_coverage(query, docs)
+    coverage = estimate_coverage(query, docs, model_name=aspect_model)
 
     return EvidenceFeatures(
         relevance=relevance,
@@ -344,16 +376,18 @@ class StructureAwareAdaptiveRAG:
         estimator: SufficiencyEstimator,
         initial_k: int = 3,
         expanded_k: int = 5,
+        aspect_model: str = "BAAI/bge-small-en-v1.5",
     ) -> None:
         self.retriever = retriever
         self.generator = generator
         self.estimator = estimator
         self.initial_k = initial_k
         self.expanded_k = expanded_k
+        self.aspect_model = aspect_model
 
     def answer(self, query: Query) -> dict:
         initial_docs = self.retriever.retrieve(query, top_k=self.initial_k)
-        initial_features = extract_evidence_features(query, initial_docs)
+        initial_features = extract_evidence_features(query, initial_docs, aspect_model=self.aspect_model)
         decision = self.estimator.predict(initial_features)
 
         if decision.sufficient:

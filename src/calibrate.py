@@ -68,7 +68,7 @@ def main() -> None:
     for query in queries:
         initial_docs = retriever.retrieve(query, args.initial_k)
         expanded_docs = retriever.retrieve(query, args.expanded_k)
-        initial_features = extract_evidence_features(query, initial_docs)
+        initial_features = extract_evidence_features(query, initial_docs, aspect_model=args.embedding_model)
         initial_correct = generator_correct(generator, query, initial_docs)
         expanded_correct = generator_correct(generator, query, expanded_docs)
         silver_label = build_silver_label(initial_correct, expanded_correct)
