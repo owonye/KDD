@@ -17,6 +17,7 @@ from rag.pipeline import (
     embed_corpus_texts,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
+    min_max_normalize,
     load_nq_queries,
     load_nq_sample,
 )
@@ -29,15 +30,15 @@ def build_resources(args: argparse.Namespace):
         simple_retriever = SimpleRetriever(corpus)
         faiss_retriever = simple_retriever
     elif args.mode == "hotpotqa":
-        raw_docs = load_hotpotqa_sample(limit=args.doc_limit)
+        raw_docs = load_hotpotqa_sample(start=args.doc_start, limit=args.doc_limit)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
-        queries = load_hotpotqa_queries(limit=args.query_limit)
+        queries = load_hotpotqa_queries(start=args.query_start, limit=args.query_limit)
         simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
         faiss_retriever = simple_retriever
     else:
-        raw_docs = load_nq_sample(limit=args.doc_limit)
+        raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
-        queries = load_nq_queries(limit=args.query_limit)
+        queries = load_nq_queries(start=args.query_start, limit=args.query_limit)
         simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
         faiss_retriever = simple_retriever
 
@@ -161,9 +162,11 @@ def run_confidence_baseline(
     threshold: float = 0.88,
 ) -> dict[str, Any]:
     initial_docs = retriever.retrieve(query, top_k=initial_k)
-    avg_score = sum(doc.retrieval_score for doc in initial_docs) / max(len(initial_docs), 1)
-    top1_score = initial_docs[0].retrieval_score if initial_docs else 0.0
-    top2_score = initial_docs[1].retrieval_score if len(initial_docs) > 1 else 0.0
+    raw_scores = [doc.retrieval_score for doc in initial_docs]
+    norm_scores = min_max_normalize(raw_scores) if raw_scores else []
+    avg_score = sum(norm_scores) / max(len(norm_scores), 1)
+    top1_score = norm_scores[0] if norm_scores else 0.0
+    top2_score = norm_scores[1] if len(norm_scores) > 1 else 0.0
     score_gap = top1_score - top2_score
 
     confidence_score = 0.5 * top1_score + 0.4 * avg_score + 0.1 * score_gap
@@ -278,7 +281,9 @@ def main() -> None:
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
+    parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=50)
+    parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=5)
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)

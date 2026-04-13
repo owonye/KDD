@@ -439,10 +439,10 @@ def embed_corpus_texts(
     return corpus
 
 
-def load_hotpotqa_sample(limit: int = 50) -> List[dict]:
+def load_hotpotqa_sample(start: int = 0, limit: int = 50) -> List[dict]:
     from datasets import load_dataset
 
-    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[:{limit}]")
+    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[{start}:{start + limit}]")
 
     raw_docs: List[dict] = []
     seen_ids = set()
@@ -468,17 +468,17 @@ def load_hotpotqa_sample(limit: int = 50) -> List[dict]:
     return raw_docs
 
 
-def load_hotpotqa_queries(limit: int = 5) -> List[Query]:
+def load_hotpotqa_queries(start: int = 0, limit: int = 5) -> List[Query]:
     from datasets import load_dataset
 
-    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[:{limit}]")
+    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[{start}:{start + limit}]")
     return [Query(text=item["question"], answer=item["answer"]) for item in dataset]
 
 
-def load_nq_sample(limit: int = 50) -> List[dict]:
+def load_nq_sample(start: int = 0, limit: int = 50) -> List[dict]:
     from datasets import load_dataset
 
-    dataset = load_dataset("natural_questions", split=f"validation[:{limit}]")
+    dataset = load_dataset("natural_questions", split=f"validation[{start}:{start + limit}]")
 
     raw_docs: List[dict] = []
     for item_idx, item in enumerate(dataset):
@@ -497,10 +497,10 @@ def load_nq_sample(limit: int = 50) -> List[dict]:
     return raw_docs
 
 
-def load_nq_queries(limit: int = 5) -> List[Query]:
+def load_nq_queries(start: int = 0, limit: int = 5) -> List[Query]:
     from datasets import load_dataset
 
-    dataset = load_dataset("natural_questions", split=f"validation[:{limit}]")
+    dataset = load_dataset("natural_questions", split=f"validation[{start}:{start + limit}]")
     queries: List[Query] = []
     for item in dataset:
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]

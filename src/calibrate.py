@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 from itertools import product
 from pathlib import Path
 
@@ -22,7 +23,14 @@ from rag.pipeline import (
 )
 
 
-def build_resources(mode: str, doc_limit: int, query_limit: int, embedding_model: str):
+def build_resources(
+    mode: str,
+    doc_start: int,
+    doc_limit: int,
+    query_start: int,
+    query_limit: int,
+    embedding_model: str,
+):
     if mode == "demo":
         corpus = build_demo_corpus()
         queries = [Query("When is the birthday of Michael Phelps?", answer="June 30, 1985")]
@@ -30,47 +38,67 @@ def build_resources(mode: str, doc_limit: int, query_limit: int, embedding_model
         return queries, retriever
 
     if mode == "hotpotqa":
-        raw_docs = load_hotpotqa_sample(limit=doc_limit)
+        raw_docs = load_hotpotqa_sample(start=doc_start, limit=doc_limit)
         corpus = embed_corpus_texts(raw_docs, model_name=embedding_model)
-        queries = load_hotpotqa_queries(limit=query_limit)
+        queries = load_hotpotqa_queries(start=query_start, limit=query_limit)
         retriever = FaissRetriever(corpus, model_name=embedding_model)
         return queries, retriever
 
-    raw_docs = load_nq_sample(limit=doc_limit)
+    raw_docs = load_nq_sample(start=doc_start, limit=doc_limit)
     corpus = embed_corpus_texts(raw_docs, model_name=embedding_model)
-    queries = load_nq_queries(limit=query_limit)
+    queries = load_nq_queries(start=query_start, limit=query_limit)
     retriever = FaissRetriever(corpus, model_name=embedding_model)
     return queries, retriever
 
 
-def generator_correct(generator: SimpleGenerator, query: Query, docs) -> bool:
+def normalize_answer(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def evidence_contains_answer(query: Query, docs) -> bool:
     if not query.answer:
         return False
-    answer = generator.generate(query, docs)
-    return exact_match_score(answer, query.answer) == 1.0
+    gold = normalize_answer(query.answer)
+    if not gold:
+        return False
+    for doc in docs:
+        if gold in normalize_answer(doc.text):
+            return True
+    return False
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["demo", "hotpotqa", "nq"], default="demo")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
+    parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=50)
+    parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=10)
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--output", default="results/calibration.json")
     args = parser.parse_args()
 
-    queries, retriever = build_resources(args.mode, args.doc_limit, args.query_limit, args.embedding_model)
-    generator = SimpleGenerator()
+    queries, retriever = build_resources(
+        args.mode,
+        args.doc_start,
+        args.doc_limit,
+        args.query_start,
+        args.query_limit,
+        args.embedding_model,
+    )
 
     examples = []
     for query in queries:
         initial_docs = retriever.retrieve(query, args.initial_k)
         expanded_docs = retriever.retrieve(query, args.expanded_k)
         initial_features = extract_evidence_features(query, initial_docs, aspect_model=args.embedding_model)
-        initial_correct = generator_correct(generator, query, initial_docs)
-        expanded_correct = generator_correct(generator, query, expanded_docs)
+        initial_correct = evidence_contains_answer(query, initial_docs)
+        expanded_correct = evidence_contains_answer(query, expanded_docs)
         silver_label = build_silver_label(initial_correct, expanded_correct)
         examples.append((initial_features, silver_label))
 

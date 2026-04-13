@@ -45,16 +45,16 @@ def build_pipeline(args: argparse.Namespace) -> tuple[StructureAwareAdaptiveRAG,
         retriever = SimpleRetriever(corpus)
         query = Query("When is the birthday of Michael Phelps?")
     elif args.mode == "hotpotqa":
-        raw_docs = load_hotpotqa_sample(limit=args.doc_limit)
+        raw_docs = load_hotpotqa_sample(start=args.doc_start, limit=args.doc_limit)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
         retriever = FaissRetriever(corpus, model_name=args.embedding_model)
-        queries = load_hotpotqa_queries(limit=args.query_limit)
+        queries = load_hotpotqa_queries(start=args.query_start, limit=args.query_limit)
         query = queries[0]
     else:
-        raw_docs = load_nq_sample(limit=args.doc_limit)
+        raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
         retriever = FaissRetriever(corpus, model_name=args.embedding_model)
-        queries = load_nq_queries(limit=args.query_limit)
+        queries = load_nq_queries(start=args.query_start, limit=args.query_limit)
         query = queries[0]
 
     generator = SimpleGenerator()
@@ -81,7 +81,9 @@ def main() -> None:
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
+    parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=50)
+    parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=5)
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)

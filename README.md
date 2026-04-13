@@ -100,6 +100,13 @@ Then reuse the calibrated weights:
 python src/evaluate.py --mode hotpotqa --calibration-file .\results\calibration_hotpotqa.json
 ```
 
+You can avoid split leakage by using different query ranges:
+
+```powershell
+python src/calibrate.py --mode hotpotqa --query-start 0 --query-limit 50 --output results/calibration_hotpotqa.json
+python src/evaluate.py --mode hotpotqa --query-start 50 --query-limit 50 --calibration-file .\results\calibration_hotpotqa.json
+```
+
 ## Result summary
 
 ```powershell
