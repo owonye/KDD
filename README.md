@@ -17,6 +17,12 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
+You can store API keys in a `.env` file at the project root:
+
+```dotenv
+OPENAI_API_KEY=your_api_key
+```
+
 ## Run modes
 
 ### 1. Demo mode
@@ -39,7 +45,7 @@ python src/main.py --mode nq
 
 ### 4. Dataset mode + OpenAI generator
 
-Set your API key first:
+Set your API key first (or use `.env`):
 
 ```powershell
 $env:OPENAI_API_KEY="your_api_key"

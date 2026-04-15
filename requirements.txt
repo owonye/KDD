@@ -5,3 +5,4 @@ sentence-transformers>=2.7
 faiss-cpu>=1.8
 openai>=1.30
 datasets>=2.19
+python-dotenv>=1.0
