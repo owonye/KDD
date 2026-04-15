@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from rag.pipeline import (
     FaissRetriever,
     OpenAIGenerator,
@@ -276,6 +278,8 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 
 def main() -> None:
+    load_dotenv()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["demo", "hotpotqa", "nq"], default="demo")
     parser.add_argument("--use-openai", action="store_true")

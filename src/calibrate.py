@@ -4,6 +4,8 @@ import re
 from itertools import product
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from evaluate import exact_match_score
 from rag.pipeline import (
     FaissRetriever,
@@ -71,6 +73,8 @@ def evidence_contains_answer(query: Query, docs) -> bool:
 
 
 def main() -> None:
+    load_dotenv()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["demo", "hotpotqa", "nq"], default="demo")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
