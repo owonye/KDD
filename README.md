@@ -1,146 +1,110 @@
-# KDD
 # KDD RAG Prototype
 
-Minimal prototype for a structure-aware adaptive retrieval paper idea:
+Structure-aware adaptive retrieval prototype for RAG.
 
-- retrieve an initial set of documents
-- analyze evidence structure
-- estimate evidence sufficiency
-- retrieve more only when needed
-
-## Quick start
+## 1) Setup (once)
 
 ```powershell
+# create venv
 python -m venv .venv
+
+# activate venv
 .venv\Scripts\Activate.ps1
+
+# install deps
 pip install -r requirements.txt
-python src/main.py
 ```
 
-You can store API keys in a `.env` file at the project root:
+## 2) API key
+
+Create `.env` at project root:
 
 ```dotenv
-OPENAI_API_KEY=your_api_key
+OPENAI_API_KEY=your_api_key_here
 ```
 
-## Run modes
+`.env` is ignored by git.
 
-### 1. Demo mode
+## 3) Core flow (dataset-level)
+
+HotpotQA:
+
+```powershell
+python src/calibrate.py --mode hotpotqa --output results/calibration_hotpotqa.json
+python src/evaluate.py --mode hotpotqa --calibration-file .\results\calibration_hotpotqa.json --use-openai
+python src/summarize_results.py
+```
+
+Natural Questions:
+
+```powershell
+python src/calibrate.py --mode nq --output results/calibration_nq.json
+python src/evaluate.py --mode nq --calibration-file .\results\calibration_nq.json --use-openai
+python src/summarize_results.py
+```
+
+## 4) Split commands by size (100 / 300 / 1000)
+
+### HotpotQA - 100
+
+```powershell
+python src/calibrate.py --mode hotpotqa --query-limit 100 --doc-limit 100 --output results/calib_hotpot_100.json
+python src/evaluate.py --mode hotpotqa --query-limit 100 --doc-limit 100 --calibration-file .\results\calib_hotpot_100.json --use-openai --output results/eval_hotpot_100.csv
+```
+
+### HotpotQA - 300
+
+```powershell
+python src/calibrate.py --mode hotpotqa --query-limit 300 --doc-limit 300 --output results/calib_hotpot_300.json
+python src/evaluate.py --mode hotpotqa --query-limit 300 --doc-limit 300 --calibration-file .\results\calib_hotpot_300.json --use-openai --output results/eval_hotpot_300.csv
+```
+
+### HotpotQA - 1000
+
+```powershell
+python src/calibrate.py --mode hotpotqa --query-limit 1000 --doc-limit 1000 --output results/calib_hotpot_1000.json
+python src/evaluate.py --mode hotpotqa --query-limit 1000 --doc-limit 1000 --calibration-file .\results\calib_hotpot_1000.json --use-openai --output results/eval_hotpot_1000.csv
+```
+
+### NQ - 100
+
+```powershell
+python src/calibrate.py --mode nq --query-limit 100 --doc-limit 100 --output results/calib_nq_100.json
+python src/evaluate.py --mode nq --query-limit 100 --doc-limit 100 --calibration-file .\results\calib_nq_100.json --use-openai --output results/eval_nq_100.csv
+```
+
+### NQ - 300
+
+```powershell
+python src/calibrate.py --mode nq --query-limit 300 --doc-limit 300 --output results/calib_nq_300.json
+python src/evaluate.py --mode nq --query-limit 300 --doc-limit 300 --calibration-file .\results\calib_nq_300.json --use-openai --output results/eval_nq_300.csv
+```
+
+### NQ - 1000
+
+```powershell
+python src/calibrate.py --mode nq --query-limit 1000 --doc-limit 1000 --output results/calib_nq_1000.json
+python src/evaluate.py --mode nq --query-limit 1000 --doc-limit 1000 --calibration-file .\results\calib_nq_1000.json --use-openai --output results/eval_nq_1000.csv
+```
+
+## 5) Auto runner
+
+```powershell
+python src/run_experiments.py --mode hotpotqa --sizes 100,300,1000 --use-openai
+python src/run_experiments.py --mode nq --sizes 100,300,1000 --use-openai
+```
+
+## 6) Quick check
 
 ```powershell
 python src/main.py --mode demo
 ```
 
-### 2. HotpotQA + FAISS mode
-
-```powershell
-python src/main.py --mode hotpotqa
-```
-
-### 3. Natural Questions + FAISS mode
-
-```powershell
-python src/main.py --mode nq
-```
-
-### 4. Dataset mode + OpenAI generator
-
-Set your API key first (or use `.env`):
-
-```powershell
-$env:OPENAI_API_KEY="your_api_key"
-```
-
-Then run:
-
-```powershell
-python src/main.py --mode hotpotqa --use-openai
-```
-
-## Baseline comparison
-
-Run all baselines and save a CSV:
-
-```powershell
-python src/evaluate.py --mode demo
-```
-
-or
-
-```powershell
-python src/evaluate.py --mode hotpotqa
-```
-
-or
-
-```powershell
-python src/evaluate.py --mode nq
-```
-
-You can also change retrieval budget:
-
-```powershell
-python src/evaluate.py --mode hotpotqa --initial-k 3 --expanded-k 5
-```
-
-This produces:
-
-- `vanilla_rag`
-- `fixed_large_k_rag`
-- `confidence_adaptive_rag`
-- `structure_aware_adaptive_rag`
-
-Results are saved to `results/baseline_results.csv`.
-
-## Calibration
-
-You can calibrate the sufficiency estimator with lightweight silver labels:
-
-```powershell
-python src/calibrate.py --mode hotpotqa --output results/calibration_hotpotqa.json
-```
-
-Then reuse the calibrated weights:
-
-```powershell
-python src/evaluate.py --mode hotpotqa --calibration-file .\results\calibration_hotpotqa.json
-```
-
-You can avoid split leakage by using different query ranges:
-
-```powershell
-python src/calibrate.py --mode hotpotqa --query-start 0 --query-limit 50 --output results/calibration_hotpotqa.json
-python src/evaluate.py --mode hotpotqa --query-start 50 --query-limit 50 --calibration-file .\results\calibration_hotpotqa.json
-```
-
-## Result summary
-
-```powershell
-python src/summarize_results.py
-```
-
-This prints:
-
-- average EM and F1
-- average retrieval calls
-- average document count
-- reason counts for each baseline
-
-## Current scope
-
-- toy retriever
-- evidence features: relevance, redundancy, diversity, supportiveness
-- rule-based sufficiency estimator
-- two actions: `answer_now` or `retrieve_more`
-
-## Implemented next steps
-
-- FAISS-based dense retriever
-- OpenAI API based generator
-- HotpotQA loader using the `datasets` library
-
 ## Notes
 
-- `demo` mode runs without external downloads.
-- `hotpotqa` and `nq` modes download the dataset and embedding model on first run.
-- `--use-openai` requires `OPENAI_API_KEY`.
+- Default baselines:
+  - `vanilla_rag`
+  - `fixed_large_k_rag`
+  - `confidence_adaptive_rag`
+  - `structure_aware_adaptive_rag`
+- First run of `hotpotqa` / `nq` may download datasets and embedding model.
