@@ -25,6 +25,24 @@ from rag.pipeline import (
 )
 
 
+VALID_BASELINES = {
+    "vanilla_rag",
+    "fixed_large_k_rag",
+    "confidence_adaptive_rag",
+    "structure_aware_adaptive_rag",
+}
+
+
+def parse_baselines(raw: str) -> list[str]:
+    baselines = [token.strip() for token in raw.split(",") if token.strip()]
+    if not baselines:
+        raise ValueError("At least one baseline must be provided.")
+    unknown = [name for name in baselines if name not in VALID_BASELINES]
+    if unknown:
+        raise ValueError(f"Unknown baseline(s): {unknown}")
+    return baselines
+
+
 def build_resources(args: argparse.Namespace):
     if args.mode == "demo":
         corpus = build_demo_corpus()
@@ -95,10 +113,10 @@ def add_metrics(row: dict[str, Any], query: Query) -> dict[str, Any]:
     return row
 
 
-def load_estimator(args: argparse.Namespace) -> SufficiencyEstimator:
+def load_estimator(args: argparse.Namespace) -> tuple[SufficiencyEstimator, str]:
     estimator = SufficiencyEstimator()
     if not args.calibration_file:
-        return estimator
+        return estimator, args.structure_aware_label or "structure_aware_adaptive_rag"
 
     calibration_path = Path(args.calibration_file).resolve()
     if not calibration_path.exists():
@@ -112,7 +130,13 @@ def load_estimator(args: argparse.Namespace) -> SufficiencyEstimator:
         redundancy_weight=config["redundancy_weight"],
         threshold=config["threshold"],
     )
-    return estimator
+    if args.structure_aware_label:
+        return estimator, args.structure_aware_label
+
+    ablate_signal = config.get("ablate_signal", "none")
+    if ablate_signal != "none":
+        return estimator, f"structure_aware_wo_{ablate_signal}"
+    return estimator, "structure_aware_adaptive_rag"
 
 
 def run_vanilla(query: Query, retriever, generator, top_k: int = 3) -> dict[str, Any]:
@@ -218,6 +242,7 @@ def run_structure_aware(
     initial_k: int = 3,
     expanded_k: int = 5,
     aspect_model: str = "BAAI/bge-small-en-v1.5",
+    baseline_name: str = "structure_aware_adaptive_rag",
 ) -> dict[str, Any]:
     pipeline = StructureAwareAdaptiveRAG(
         retriever=retriever,
@@ -230,7 +255,7 @@ def run_structure_aware(
     result = pipeline.answer(query)
     retrieval_calls = 1 if result["decision"] == "answer_now" else 2
     return {
-        "baseline": "structure_aware_adaptive_rag",
+        "baseline": baseline_name,
         "query": query.text,
         "decision": result["decision"],
         "reason": result["reason"],
@@ -293,43 +318,54 @@ def main() -> None:
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
     parser.add_argument("--calibration-file", default="")
+    parser.add_argument(
+        "--baselines",
+        default="vanilla_rag,fixed_large_k_rag,confidence_adaptive_rag,structure_aware_adaptive_rag",
+    )
+    parser.add_argument("--structure-aware-label", default="")
     parser.add_argument("--output", default="results/baseline_results.csv")
     args = parser.parse_args()
 
     _, queries, simple_retriever, _, generator = build_resources(args)
-    estimator = load_estimator(args)
+    estimator, structure_aware_name = load_estimator(args)
+    selected_baselines = set(parse_baselines(args.baselines))
 
     rows: list[dict[str, Any]] = []
     for query in queries:
-        rows.append(add_metrics(run_vanilla(query, simple_retriever, generator, top_k=args.initial_k), query))
-        rows.append(add_metrics(run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k), query))
-        rows.append(
-            add_metrics(
-                run_confidence_baseline(
+        if "vanilla_rag" in selected_baselines:
+            rows.append(add_metrics(run_vanilla(query, simple_retriever, generator, top_k=args.initial_k), query))
+        if "fixed_large_k_rag" in selected_baselines:
+            rows.append(add_metrics(run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k), query))
+        if "confidence_adaptive_rag" in selected_baselines:
+            rows.append(
+                add_metrics(
+                    run_confidence_baseline(
+                        query,
+                        simple_retriever,
+                        generator,
+                        initial_k=args.initial_k,
+                        expanded_k=args.expanded_k,
+                        threshold=args.confidence_threshold,
+                    ),
                     query,
-                    simple_retriever,
-                    generator,
-                    initial_k=args.initial_k,
-                    expanded_k=args.expanded_k,
-                    threshold=args.confidence_threshold,
-                ),
-                query,
+                )
             )
-        )
-        rows.append(
-            add_metrics(
-                run_structure_aware(
+        if "structure_aware_adaptive_rag" in selected_baselines:
+            rows.append(
+                add_metrics(
+                    run_structure_aware(
+                        query,
+                        simple_retriever,
+                        generator,
+                        estimator,
+                        initial_k=args.initial_k,
+                        expanded_k=args.expanded_k,
+                        aspect_model=args.embedding_model,
+                        baseline_name=structure_aware_name,
+                    ),
                     query,
-                    simple_retriever,
-                    generator,
-                    estimator,
-                    initial_k=args.initial_k,
-                    expanded_k=args.expanded_k,
-                    aspect_model=args.embedding_model,
-                ),
-                query,
+                )
             )
-        )
 
     output_path = Path(args.output)
     write_results(rows, output_path)

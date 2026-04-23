@@ -8,6 +8,12 @@ from typing import List, Optional, Protocol
 
 import numpy as np
 
+CONTENT_STOPWORDS = {
+    "what", "when", "where", "who", "which", "why", "how", "is", "are", "was",
+    "were", "the", "a", "an", "of", "in", "on", "for", "to", "did", "do", "does",
+    "and", "or", "with", "by", "from", "as", "at",
+}
+
 
 @dataclass
 class Query:
@@ -195,7 +201,7 @@ def min_max_normalize(values: List[float]) -> List[float]:
 
 
 def compute_query_overlap(query: Query, doc: RetrievedDocument) -> float:
-    query_tokens = set(normalize_text(query.text))
+    query_tokens = set(extract_content_tokens(query.text))
     doc_tokens = set(normalize_text(doc.text))
     if not query_tokens or not doc_tokens:
         return 0.0
@@ -203,22 +209,25 @@ def compute_query_overlap(query: Query, doc: RetrievedDocument) -> float:
     return overlap / len(query_tokens)
 
 
+def extract_content_tokens(text: str) -> List[str]:
+    tokens = normalize_text(text)
+    filtered = [token for token in tokens if token not in CONTENT_STOPWORDS]
+    return filtered if filtered else tokens
+
+
 def extract_question_aspects(query: Query) -> List[str]:
     tokens = normalize_text(query.text)
-    stopwords = {
-        "what", "when", "where", "who", "which", "why", "how", "is", "are", "was",
-        "were", "the", "a", "an", "of", "in", "on", "for", "to", "did", "do", "does",
-        "and", "or", "with", "by", "from", "as", "at",
-    }
-    filtered = [token for token in tokens if token not in stopwords]
+    filtered = extract_content_tokens(query.text)
 
     # Add simple bigrams to capture lightweight aspect phrases.
     bigrams = [" ".join(pair) for pair in zip(filtered, filtered[1:])]
 
     # Capture capitalized tokens from the original query (lightweight entity hint).
     capitalized = re.findall(r"\b[A-Z][a-zA-Z]+\b", query.text)
+    # Capture simple numeric patterns as lightweight aspect cues.
+    numeric_like = re.findall(r"\b\d+[a-zA-Z0-9\-]*\b", query.text)
 
-    aspects = list(dict.fromkeys(filtered + bigrams + capitalized))
+    aspects = list(dict.fromkeys(filtered + bigrams + capitalized + numeric_like))
     if not aspects:
         return tokens[:3]
     return aspects

@@ -81,6 +81,15 @@ def is_monotonic_configuration(
     return all(weight >= 0.0 for weight in [relevance_weight, coverage_weight, supportiveness_weight, redundancy_weight])
 
 
+def get_weight_grid(ablate_signal: str) -> tuple[list[float], list[float], list[float], list[float]]:
+    default_grid = [0.1, 0.2, 0.35, 0.5]
+    wr_grid = [0.0] if ablate_signal == "relevance" else default_grid
+    wc_grid = [0.0] if ablate_signal == "coverage" else default_grid
+    ws_grid = [0.0] if ablate_signal == "supportiveness" else default_grid
+    wu_grid = [0.0] if ablate_signal == "redundancy" else default_grid
+    return wr_grid, wc_grid, ws_grid, wu_grid
+
+
 def main() -> None:
     load_dotenv()
 
@@ -94,6 +103,11 @@ def main() -> None:
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--weak-support-overlap-threshold", type=float, default=0.2)
+    parser.add_argument(
+        "--ablate-signal",
+        choices=["none", "relevance", "redundancy", "coverage", "supportiveness"],
+        default="none",
+    )
     parser.add_argument("--output", default="results/calibration.json")
     args = parser.parse_args()
 
@@ -122,10 +136,10 @@ def main() -> None:
 
     best = None
     best_acc = -1.0
-    weight_grid = [0.1, 0.2, 0.35, 0.5]
+    wr_grid, wc_grid, ws_grid, wu_grid = get_weight_grid(args.ablate_signal)
     threshold_grid = [0.3, 0.4, 0.5, 0.6, 0.7]
 
-    for wr, wc, ws, wu, threshold in product(weight_grid, weight_grid, weight_grid, weight_grid, threshold_grid):
+    for wr, wc, ws, wu, threshold in product(wr_grid, wc_grid, ws_grid, wu_grid, threshold_grid):
         if not is_monotonic_configuration(wr, wc, ws, wu):
             continue
         estimator = SufficiencyEstimator(
@@ -152,6 +166,7 @@ def main() -> None:
                 "silver_accuracy": acc,
                 "num_examples": len(examples),
                 "weak_support_overlap_threshold": args.weak_support_overlap_threshold,
+                "ablate_signal": args.ablate_signal,
             }
 
     output_path = Path(args.output)
