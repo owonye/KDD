@@ -288,7 +288,7 @@ def main() -> None:
             "num_queries": len(queries),
             "num_examples": len(examples),
             "excluded_no_support": excluded_no_support,
-            "generator_type": "openai" if args.use_openai else "simple",
+            "generator_type": "openai" if args.use_openai else "simple_placeholder",
             "model_version": args.openai_model if args.use_openai else "simple_placeholder",
             "openai_cache_stats": generator.get_cache_stats() if generator else None,
             "output": str(output_path),
