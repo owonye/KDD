@@ -6,16 +6,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from evaluate import exact_match_score
 from rag.pipeline import (
     FaissRetriever,
     Query,
-    SimpleGenerator,
     SimpleRetriever,
-    StructureAwareAdaptiveRAG,
     SufficiencyEstimator,
     build_demo_corpus,
     build_silver_label,
+    compute_query_overlap,
     embed_corpus_texts,
     extract_evidence_features,
     load_hotpotqa_queries,
@@ -60,16 +58,27 @@ def normalize_answer(text: str) -> str:
     return text
 
 
-def evidence_contains_answer(query: Query, docs) -> bool:
+def evidence_has_weak_support(query: Query, docs, overlap_threshold: float) -> bool:
     if not query.answer:
         return False
     gold = normalize_answer(query.answer)
     if not gold:
         return False
     for doc in docs:
-        if gold in normalize_answer(doc.text):
+        if gold in normalize_answer(doc.text) and compute_query_overlap(query, doc) >= overlap_threshold:
             return True
     return False
+
+
+def is_monotonic_configuration(
+    relevance_weight: float,
+    coverage_weight: float,
+    supportiveness_weight: float,
+    redundancy_weight: float,
+) -> bool:
+    # F(D,q)=wr*R - wu*U + wc*C + ws*S follows monotonicity
+    # when all weights are non-negative.
+    return all(weight >= 0.0 for weight in [relevance_weight, coverage_weight, supportiveness_weight, redundancy_weight])
 
 
 def main() -> None:
@@ -84,6 +93,7 @@ def main() -> None:
     parser.add_argument("--query-limit", type=int, default=100)
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
+    parser.add_argument("--weak-support-overlap-threshold", type=float, default=0.2)
     parser.add_argument("--output", default="results/calibration.json")
     args = parser.parse_args()
 
@@ -101,8 +111,12 @@ def main() -> None:
         initial_docs = retriever.retrieve(query, args.initial_k)
         expanded_docs = retriever.retrieve(query, args.expanded_k)
         initial_features = extract_evidence_features(query, initial_docs, aspect_model=args.embedding_model)
-        initial_correct = evidence_contains_answer(query, initial_docs)
-        expanded_correct = evidence_contains_answer(query, expanded_docs)
+        initial_correct = evidence_has_weak_support(
+            query, initial_docs, overlap_threshold=args.weak_support_overlap_threshold
+        )
+        expanded_correct = evidence_has_weak_support(
+            query, expanded_docs, overlap_threshold=args.weak_support_overlap_threshold
+        )
         silver_label = build_silver_label(initial_correct, expanded_correct)
         examples.append((initial_features, silver_label))
 
@@ -112,6 +126,8 @@ def main() -> None:
     threshold_grid = [0.3, 0.4, 0.5, 0.6, 0.7]
 
     for wr, wc, ws, wu, threshold in product(weight_grid, weight_grid, weight_grid, weight_grid, threshold_grid):
+        if not is_monotonic_configuration(wr, wc, ws, wu):
+            continue
         estimator = SufficiencyEstimator(
             relevance_weight=wr,
             coverage_weight=wc,
@@ -135,6 +151,7 @@ def main() -> None:
                 "threshold": threshold,
                 "silver_accuracy": acc,
                 "num_examples": len(examples),
+                "weak_support_overlap_threshold": args.weak_support_overlap_threshold,
             }
 
     output_path = Path(args.output)

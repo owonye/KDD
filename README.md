@@ -94,6 +94,17 @@ python src/run_experiments.py --mode hotpotqa --sizes 100,300,1000 --use-openai
 python src/run_experiments.py --mode nq --sizes 100,300,1000 --use-openai
 ```
 
+By default, `run_experiments.py` uses disjoint query slices for calibration and evaluation:
+
+- calibration: `[query_start : query_start + size]`
+- evaluation: `[query_start + size : query_start + 2*size]`
+
+You can override this with:
+
+```powershell
+python src/run_experiments.py --mode hotpotqa --sizes 300 --calib-query-start 0 --calib-query-limit 300 --eval-query-start 300 --eval-query-limit 300
+```
+
 ## 6) Quick check
 
 ```powershell

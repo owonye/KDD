@@ -26,6 +26,7 @@ def main() -> None:
             "f1_sum": 0.0,
             "retrieval_calls_sum": 0.0,
             "doc_count_sum": 0.0,
+            "expanded_count": 0.0,
         }
     )
     reason_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -39,21 +40,24 @@ def main() -> None:
             grouped[name]["f1_sum"] += safe_float(row.get("f1", "0"))
             grouped[name]["retrieval_calls_sum"] += safe_float(row.get("retrieval_calls", "0"))
             grouped[name]["doc_count_sum"] += safe_float(row.get("doc_count", "0"))
+            if row.get("decision") == "retrieve_more":
+                grouped[name]["expanded_count"] += 1
             reason = row.get("reason", "")
             if reason:
                 reason_counts[name][reason] += 1
 
     print("=== Baseline Summary ===")
-    print(f"{'baseline':30} {'n':>4} {'EM':>8} {'F1':>8} {'calls':>8} {'docs':>8}")
+    print(f"{'baseline':30} {'n':>4} {'EM':>8} {'F1':>8} {'calls':>8} {'docs':>8} {'expand%':>8}")
     for name, stats in grouped.items():
         count = max(stats["count"], 1.0)
         avg_em = stats["exact_match_sum"] / count
         avg_f1 = stats["f1_sum"] / count
         avg_calls = stats["retrieval_calls_sum"] / count
         avg_docs = stats["doc_count_sum"] / count
+        expand_rate = stats["expanded_count"] / count
         print(
             f"{name:30} {int(count):4d} "
-            f"{avg_em:8.3f} {avg_f1:8.3f} {avg_calls:8.3f} {avg_docs:8.3f}"
+            f"{avg_em:8.3f} {avg_f1:8.3f} {avg_calls:8.3f} {avg_docs:8.3f} {expand_rate:8.3f}"
         )
 
     print("\n=== Reason Counts ===")

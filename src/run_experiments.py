@@ -32,6 +32,11 @@ def main() -> None:
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
+    parser.add_argument("--weak-support-overlap-threshold", type=float, default=0.2)
+    parser.add_argument("--calib-query-start", type=int, default=None)
+    parser.add_argument("--calib-query-limit", type=int, default=None)
+    parser.add_argument("--eval-query-start", type=int, default=None)
+    parser.add_argument("--eval-query-limit", type=int, default=None)
     parser.add_argument("--output-dir", default="results")
     parser.add_argument("--use-openai", action="store_true")
     args = parser.parse_args()
@@ -43,6 +48,10 @@ def main() -> None:
     for size in sizes:
         calib_path = output_dir / f"calib_{args.mode}_{size}.json"
         eval_path = output_dir / f"eval_{args.mode}_{size}.csv"
+        calib_query_start = args.calib_query_start if args.calib_query_start is not None else args.query_start
+        calib_query_limit = args.calib_query_limit if args.calib_query_limit is not None else size
+        eval_query_start = args.eval_query_start if args.eval_query_start is not None else (calib_query_start + calib_query_limit)
+        eval_query_limit = args.eval_query_limit if args.eval_query_limit is not None else size
 
         calibrate_cmd = [
             sys.executable,
@@ -54,15 +63,17 @@ def main() -> None:
             "--doc-limit",
             str(size),
             "--query-start",
-            str(args.query_start),
+            str(calib_query_start),
             "--query-limit",
-            str(size),
+            str(calib_query_limit),
             "--embedding-model",
             args.embedding_model,
             "--initial-k",
             str(args.initial_k),
             "--expanded-k",
             str(args.expanded_k),
+            "--weak-support-overlap-threshold",
+            str(args.weak_support_overlap_threshold),
             "--output",
             str(calib_path),
         ]
@@ -78,9 +89,9 @@ def main() -> None:
             "--doc-limit",
             str(size),
             "--query-start",
-            str(args.query_start),
+            str(eval_query_start),
             "--query-limit",
-            str(size),
+            str(eval_query_limit),
             "--embedding-model",
             args.embedding_model,
             "--initial-k",

@@ -241,13 +241,31 @@ def get_aspect_encoder(model_name: str):
 
 def compute_aspect_document_similarity(aspect: str, doc: RetrievedDocument, encoder=None) -> float:
     if encoder is None:
-        doc_tokens = set(normalize_text(doc.text))
-        if not doc_tokens:
-            return 0.0
-        return 1.0 if aspect in doc_tokens else 0.0
+        return compute_aspect_lexical_overlap(aspect, doc)
 
-    aspect_vec = encoder.encode([aspect], normalize_embeddings=True)[0]
+    aspect_tokens = normalize_text(aspect)
+    if not aspect_tokens:
+        return compute_aspect_lexical_overlap(aspect, doc)
+
+    # Build an aspect vector from token-level embeddings and average them.
+    token_vectors = encoder.encode(aspect_tokens, normalize_embeddings=True)
+    if len(token_vectors) == 0:
+        return compute_aspect_lexical_overlap(aspect, doc)
+
+    aspect_vec = np.mean(np.array(token_vectors, dtype="float32"), axis=0)
+    norm = np.linalg.norm(aspect_vec)
+    if norm == 0.0:
+        return compute_aspect_lexical_overlap(aspect, doc)
+    aspect_vec = aspect_vec / norm
     return float(np.dot(aspect_vec, np.array(doc.embedding)))
+
+
+def compute_aspect_lexical_overlap(aspect: str, doc: RetrievedDocument) -> float:
+    aspect_tokens = set(normalize_text(aspect))
+    doc_tokens = set(normalize_text(doc.text))
+    if not aspect_tokens or not doc_tokens:
+        return 0.0
+    return len(aspect_tokens & doc_tokens) / len(aspect_tokens)
 
 
 def estimate_coverage(query: Query, docs: List[RetrievedDocument], model_name: str = "BAAI/bge-small-en-v1.5") -> float:
@@ -274,8 +292,6 @@ def estimate_supportiveness(query: Query, docs: List[RetrievedDocument], normali
     for doc, normalized_score in zip(docs, normalized_scores):
         overlap_score = compute_query_overlap(query, doc)
         blended_score = 0.5 * normalized_score + 0.5 * overlap_score
-        if doc.supportiveness_score != 0.5:
-            blended_score = 0.5 * blended_score + 0.5 * doc.supportiveness_score
         scores.append(blended_score)
     return max(scores) if scores else 0.0
 
@@ -555,8 +571,11 @@ def build_demo_corpus() -> List[RetrievedDocument]:
 
 
 def build_silver_label(initial_correct: bool, expanded_correct: bool) -> int:
+    # Sufficient if weak support is already present in D.
     if initial_correct:
         return 1
+    # Insufficient if support appears only after expansion.
     if expanded_correct:
         return 0
+    # Also insufficient when support is absent in both D and D+.
     return 0
