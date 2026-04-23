@@ -7,6 +7,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from experiment_utils import set_global_seed, write_run_config
 from rag.pipeline import (
     FaissRetriever,
     OpenAIGenerator,
@@ -50,21 +51,24 @@ def build_resources(args: argparse.Namespace):
         simple_retriever = SimpleRetriever(corpus)
         faiss_retriever = simple_retriever
     elif args.mode == "hotpotqa":
-        raw_docs = load_hotpotqa_sample(start=args.doc_start, limit=args.doc_limit)
+        raw_docs = load_hotpotqa_sample(start=args.doc_start, limit=args.doc_limit, split=args.corpus_split)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
-        queries = load_hotpotqa_queries(start=args.query_start, limit=args.query_limit)
+        queries = load_hotpotqa_queries(start=args.query_start, limit=args.query_limit, split=args.query_split)
         simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
         faiss_retriever = simple_retriever
     else:
-        raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit)
+        raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit, split=args.corpus_split)
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
-        queries = load_nq_queries(start=args.query_start, limit=args.query_limit)
+        queries = load_nq_queries(start=args.query_start, limit=args.query_limit, split=args.query_split)
         simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
         faiss_retriever = simple_retriever
 
-    generator = SimpleGenerator()
-    if args.use_openai:
-        generator = OpenAIGenerator(model=args.openai_model)
+    if args.mode != "demo" and not args.use_openai and not args.allow_simple_generator:
+        raise ValueError(
+            "Non-demo evaluation requires real QA generation. Use --use-openai or pass --allow-simple-generator explicitly."
+        )
+
+    generator = OpenAIGenerator(model=args.openai_model) if args.use_openai else SimpleGenerator()
 
     return corpus, queries, simple_retriever, faiss_retriever, generator
 
@@ -277,6 +281,7 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
         writer = csv.DictWriter(
             f,
             fieldnames=[
+                "query_id",
                 "baseline",
                 "query",
                 "decision",
@@ -308,15 +313,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["demo", "hotpotqa", "nq"], default="demo")
     parser.add_argument("--use-openai", action="store_true")
+    parser.add_argument("--allow-simple-generator", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=100)
+    parser.add_argument("--corpus-split", default="validation")
     parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=100)
+    parser.add_argument("--query-split", default="validation")
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--calibration-file", default="")
     parser.add_argument(
         "--baselines",
@@ -325,50 +334,67 @@ def main() -> None:
     parser.add_argument("--structure-aware-label", default="")
     parser.add_argument("--output", default="results/baseline_results.csv")
     args = parser.parse_args()
+    if not args.use_openai and args.mode != "demo" and not args.allow_simple_generator:
+        raise ValueError("For paper-grade EM/F1, run evaluate.py with --use-openai.")
+    set_global_seed(args.seed)
 
     _, queries, simple_retriever, _, generator = build_resources(args)
     estimator, structure_aware_name = load_estimator(args)
     selected_baselines = set(parse_baselines(args.baselines))
 
     rows: list[dict[str, Any]] = []
-    for query in queries:
+    for query_id, query in enumerate(queries):
         if "vanilla_rag" in selected_baselines:
-            rows.append(add_metrics(run_vanilla(query, simple_retriever, generator, top_k=args.initial_k), query))
+            row = add_metrics(run_vanilla(query, simple_retriever, generator, top_k=args.initial_k), query)
+            row["query_id"] = query_id
+            rows.append(row)
         if "fixed_large_k_rag" in selected_baselines:
-            rows.append(add_metrics(run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k), query))
+            row = add_metrics(run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k), query)
+            row["query_id"] = query_id
+            rows.append(row)
         if "confidence_adaptive_rag" in selected_baselines:
-            rows.append(
-                add_metrics(
-                    run_confidence_baseline(
-                        query,
-                        simple_retriever,
-                        generator,
-                        initial_k=args.initial_k,
-                        expanded_k=args.expanded_k,
-                        threshold=args.confidence_threshold,
-                    ),
+            row = add_metrics(
+                run_confidence_baseline(
                     query,
-                )
+                    simple_retriever,
+                    generator,
+                    initial_k=args.initial_k,
+                    expanded_k=args.expanded_k,
+                    threshold=args.confidence_threshold,
+                ),
+                query,
             )
+            row["query_id"] = query_id
+            rows.append(row)
         if "structure_aware_adaptive_rag" in selected_baselines:
-            rows.append(
-                add_metrics(
-                    run_structure_aware(
-                        query,
-                        simple_retriever,
-                        generator,
-                        estimator,
-                        initial_k=args.initial_k,
-                        expanded_k=args.expanded_k,
-                        aspect_model=args.embedding_model,
-                        baseline_name=structure_aware_name,
-                    ),
+            row = add_metrics(
+                run_structure_aware(
                     query,
-                )
+                    simple_retriever,
+                    generator,
+                    estimator,
+                    initial_k=args.initial_k,
+                    expanded_k=args.expanded_k,
+                    aspect_model=args.embedding_model,
+                    baseline_name=structure_aware_name,
+                ),
+                query,
             )
+            row["query_id"] = query_id
+            rows.append(row)
 
     output_path = Path(args.output)
     write_results(rows, output_path)
+    write_run_config(
+        output_path.with_suffix(".meta.json"),
+        {
+            "script": "evaluate.py",
+            "args": vars(args),
+            "num_queries": len(queries),
+            "num_rows": len(rows),
+            "output": str(output_path),
+        },
+    )
 
     print(f"Saved results to {output_path}")
     for row in rows[:4]:

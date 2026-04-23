@@ -464,10 +464,10 @@ def embed_corpus_texts(
     return corpus
 
 
-def load_hotpotqa_sample(start: int = 0, limit: int = 50) -> List[dict]:
+def load_hotpotqa_sample(start: int = 0, limit: int = 50, split: str = "validation") -> List[dict]:
     from datasets import load_dataset
 
-    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[{start}:{start + limit}]")
+    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"{split}[{start}:{start + limit}]")
 
     raw_docs: List[dict] = []
     seen_ids = set()
@@ -493,17 +493,82 @@ def load_hotpotqa_sample(start: int = 0, limit: int = 50) -> List[dict]:
     return raw_docs
 
 
-def load_hotpotqa_queries(start: int = 0, limit: int = 5) -> List[Query]:
+def load_hotpotqa_queries(start: int = 0, limit: int = 5, split: str = "validation") -> List[Query]:
     from datasets import load_dataset
 
-    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"validation[{start}:{start + limit}]")
+    dataset = load_dataset("hotpot_qa", "fullwiki", split=f"{split}[{start}:{start + limit}]")
     return [Query(text=item["question"], answer=item["answer"]) for item in dataset]
 
 
-def load_nq_sample(start: int = 0, limit: int = 50) -> List[dict]:
+def _extract_nq_document_tokens(item: dict) -> List[str]:
+    document = item.get("document")
+    if not isinstance(document, dict):
+        return []
+
+    tokens_field = document.get("tokens")
+    if isinstance(tokens_field, dict):
+        # Common schema: {"token": [...], "is_html": [...]}
+        token_values = tokens_field.get("token")
+        if isinstance(token_values, list):
+            return [str(token) for token in token_values if str(token).strip()]
+    elif isinstance(tokens_field, list):
+        values: List[str] = []
+        for entry in tokens_field:
+            if isinstance(entry, dict):
+                token = entry.get("token")
+                if token:
+                    values.append(str(token))
+            elif entry:
+                values.append(str(entry))
+        return values
+
+    text_field = document.get("text")
+    if isinstance(text_field, str) and text_field.strip():
+        return text_field.split()
+    return []
+
+
+def _extract_nq_short_answer_text(item: dict) -> Optional[str]:
+    annotations = item.get("annotations")
+    candidate_answers: List[dict] = []
+
+    if isinstance(annotations, dict):
+        raw = annotations.get("short_answers", [])
+        if isinstance(raw, list):
+            candidate_answers.extend([answer for answer in raw if isinstance(answer, dict)])
+    elif isinstance(annotations, list):
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                continue
+            raw = annotation.get("short_answers", [])
+            if isinstance(raw, list):
+                candidate_answers.extend([answer for answer in raw if isinstance(answer, dict)])
+
+    if not candidate_answers:
+        return None
+
+    for answer in candidate_answers:
+        answer_text = answer.get("text")
+        if isinstance(answer_text, str) and answer_text.strip():
+            return answer_text.strip()
+
+        start_token = answer.get("start_token")
+        end_token = answer.get("end_token")
+        if isinstance(start_token, int) and isinstance(end_token, int) and end_token > start_token:
+            tokens = _extract_nq_document_tokens(item)
+            if tokens and start_token < len(tokens):
+                clipped_end = min(end_token, len(tokens))
+                span = tokens[start_token:clipped_end]
+                span_text = " ".join(token for token in span if token).strip()
+                if span_text:
+                    return span_text
+    return None
+
+
+def load_nq_sample(start: int = 0, limit: int = 50, split: str = "validation") -> List[dict]:
     from datasets import load_dataset
 
-    dataset = load_dataset("natural_questions", split=f"validation[{start}:{start + limit}]")
+    dataset = load_dataset("natural_questions", split=f"{split}[{start}:{start + limit}]")
 
     raw_docs: List[dict] = []
     for item_idx, item in enumerate(dataset):
@@ -522,19 +587,14 @@ def load_nq_sample(start: int = 0, limit: int = 50) -> List[dict]:
     return raw_docs
 
 
-def load_nq_queries(start: int = 0, limit: int = 5) -> List[Query]:
+def load_nq_queries(start: int = 0, limit: int = 5, split: str = "validation") -> List[Query]:
     from datasets import load_dataset
 
-    dataset = load_dataset("natural_questions", split=f"validation[{start}:{start + limit}]")
+    dataset = load_dataset("natural_questions", split=f"{split}[{start}:{start + limit}]")
     queries: List[Query] = []
     for item in dataset:
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
-        answers = item.get("annotations", {}).get("short_answers", []) if isinstance(item.get("annotations"), dict) else []
-        answer_text = None
-        if answers:
-            first_answer = answers[0]
-            if isinstance(first_answer, dict):
-                answer_text = first_answer.get("text")
+        answer_text = _extract_nq_short_answer_text(item)
         queries.append(Query(text=question_text, answer=answer_text))
     return queries
 
