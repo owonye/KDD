@@ -82,6 +82,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="results")
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
+    parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--allow-simple-generator", action="store_true")
     args = parser.parse_args()
 
@@ -112,8 +113,13 @@ def main() -> None:
                 raise ValueError("Calibration/evaluation query slices overlap. Use --allow-overlap-splits to bypass.")
 
         if args.corpus_split != args.query_split and args.doc_slice_policy == "query_union":
+            if args.doc_limit is None:
+                raise ValueError(
+                    "When corpus_split != query_split with query_union policy, set --doc-limit explicitly "
+                    "to ensure sufficient corpus coverage."
+                )
             current_doc_start = args.doc_start
-            current_doc_limit = args.doc_limit if args.doc_limit is not None else max(sizes)
+            current_doc_limit = args.doc_limit
         else:
             current_doc_start, current_doc_limit = resolve_doc_slice(
                 policy=args.doc_slice_policy,
@@ -158,7 +164,15 @@ def main() -> None:
             str(calib_path),
         ]
         if args.use_openai:
-            calibrate_cmd.extend(["--use-openai", "--openai-model", args.openai_model])
+            calibrate_cmd.extend(
+                [
+                    "--use-openai",
+                    "--openai-model",
+                    args.openai_model,
+                    "--openai-cache-path",
+                    args.openai_cache_path,
+                ]
+            )
         run_command(calibrate_cmd)
 
         evaluate_cmd = [
@@ -194,7 +208,15 @@ def main() -> None:
             str(eval_path),
         ]
         if args.use_openai:
-            evaluate_cmd.extend(["--use-openai", "--openai-model", args.openai_model])
+            evaluate_cmd.extend(
+                [
+                    "--use-openai",
+                    "--openai-model",
+                    args.openai_model,
+                    "--openai-cache-path",
+                    args.openai_cache_path,
+                ]
+            )
         if args.allow_simple_generator:
             evaluate_cmd.append("--allow-simple-generator")
         run_command(evaluate_cmd)
@@ -240,7 +262,15 @@ def main() -> None:
                     str(ablation_calib_path),
                 ]
                 if args.use_openai:
-                    ablation_calibrate_cmd.extend(["--use-openai", "--openai-model", args.openai_model])
+                    ablation_calibrate_cmd.extend(
+                        [
+                            "--use-openai",
+                            "--openai-model",
+                            args.openai_model,
+                            "--openai-cache-path",
+                            args.openai_cache_path,
+                        ]
+                    )
                 run_command(ablation_calibrate_cmd)
 
                 ablation_evaluate_cmd = [
@@ -276,7 +306,15 @@ def main() -> None:
                     str(ablation_eval_path),
                 ]
                 if args.use_openai:
-                    ablation_evaluate_cmd.extend(["--use-openai", "--openai-model", args.openai_model])
+                    ablation_evaluate_cmd.extend(
+                        [
+                            "--use-openai",
+                            "--openai-model",
+                            args.openai_model,
+                            "--openai-cache-path",
+                            args.openai_cache_path,
+                        ]
+                    )
                 if args.allow_simple_generator:
                     ablation_evaluate_cmd.append("--allow-simple-generator")
                 run_command(ablation_evaluate_cmd)
@@ -289,9 +327,9 @@ def main() -> None:
                 sys.executable,
                 "src/summarize_results.py",
                 "--inputs-glob",
-                f"results/eval_{args.mode}_{size}*.csv",
+                str(output_dir / f"eval_{args.mode}_{size}*.csv"),
                 "--ablation-output",
-                f"results/ablation_summary_{args.mode}_{size}.csv",
+                str(output_dir / f"ablation_summary_{args.mode}_{size}.csv"),
             ]
             run_command(ablation_summary_cmd)
 
@@ -301,9 +339,12 @@ def main() -> None:
             "--input",
             str(eval_path),
             "--output",
-            f"results/case_analysis_{args.mode}_{size}.csv",
+            str(output_dir / f"case_analysis_{args.mode}_{size}.csv"),
             "--top-n",
             "20",
+            "--balance-by-reason",
+            "--max-per-reason",
+            "5",
         ]
         run_command(case_analysis_cmd)
 
@@ -321,6 +362,10 @@ def main() -> None:
                     "evaluation": str(eval_path),
                     "ablation": ablation_outputs,
                 },
+                "generator_type": "openai" if args.use_openai else "simple_placeholder",
+                "model_version": args.openai_model if args.use_openai else "simple_placeholder",
+                "label_strategy": args.label_strategy,
+                "ablate_signal": ablation_signals if args.run_ablation else [],
             },
         )
 

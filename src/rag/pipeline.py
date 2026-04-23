@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import mean
 from typing import List, Optional, Protocol
 
@@ -19,6 +22,7 @@ CONTENT_STOPWORDS = {
 class Query:
     text: str
     answer: Optional[str] = None
+    answers: Optional[List[str]] = None
 
 
 @dataclass
@@ -27,7 +31,6 @@ class RetrievedDocument:
     text: str
     retrieval_score: float
     embedding: List[float]
-    supportiveness_score: float = 0.5
 
 
 class Retriever(Protocol):
@@ -91,7 +94,7 @@ class OpenAIGenerator:
     Requires OPENAI_API_KEY to be set in the environment.
     """
 
-    def __init__(self, model: str = "gpt-4.1-mini") -> None:
+    def __init__(self, model: str = "gpt-4.1-mini", cache_path: Optional[str] = None) -> None:
         from openai import OpenAI
 
         api_key = os.getenv("OPENAI_API_KEY")
@@ -100,6 +103,71 @@ class OpenAIGenerator:
 
         self.client = OpenAI(api_key=api_key)
         self.model = model
+        self._cache: dict[str, str] = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.cache_path = cache_path or os.getenv("OPENAI_CACHE_PATH", "")
+        if self.cache_path:
+            self._load_disk_cache()
+
+    def _load_disk_cache(self) -> None:
+        path = self._cache_file_path()
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = entry.get("key")
+                value = entry.get("value")
+                if isinstance(key, str) and isinstance(value, str):
+                    self._cache[key] = value
+
+    def _cache_file_path(self) -> Path:
+        return Path(self.cache_path)
+
+    def _append_disk_cache(self, key: str, value: str) -> None:
+        path = self._cache_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"key": key, "value": value}, ensure_ascii=False) + "\n")
+
+    def get_cache_stats(self) -> dict[str, int]:
+        return {
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "cache_size": len(self._cache),
+        }
+
+    def _cache_key(self, query: Query, evidence: List[RetrievedDocument]) -> str:
+        ids = "|".join(doc.doc_id for doc in evidence)
+        return f"{self.model}::{query.text}::{ids}"
+
+    def _request_with_retry(self, prompt: str) -> str:
+        for attempt in range(3):
+            try:
+                if hasattr(self.client, "responses"):
+                    response = self.client.responses.create(
+                        model=self.model,
+                        input=prompt,
+                    )
+                    return response.output_text.strip()
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                )
+                return (response.choices[0].message.content or "").strip()
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(1.5 * (attempt + 1))
+        return ""
 
     def generate(self, query: Query, evidence: List[RetrievedDocument]) -> str:
         context = "\n\n".join(
@@ -111,11 +179,17 @@ class OpenAIGenerator:
             f"Evidence:\n{context}\n\n"
             "Answer:"
         )
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-        )
-        return response.output_text.strip()
+        key = self._cache_key(query, evidence)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self.cache_hits += 1
+            return cached
+        self.cache_misses += 1
+        output = self._request_with_retry(prompt)
+        self._cache[key] = output
+        if self.cache_path:
+            self._append_disk_cache(key, output)
+        return output
 
 
 class FaissRetriever:
@@ -159,7 +233,6 @@ class FaissRetriever:
                     doc_id=doc.doc_id,
                     text=doc.text,
                     retrieval_score=float(score),
-                    supportiveness_score=doc.supportiveness_score,
                     embedding=doc.embedding,
                 )
             )
@@ -233,19 +306,21 @@ def extract_question_aspects(query: Query) -> List[str]:
     return aspects
 
 
-_ASPECT_ENCODER = None
+_ASPECT_ENCODER_BY_MODEL: dict[str, object] = {}
 
 
 def get_aspect_encoder(model_name: str):
-    global _ASPECT_ENCODER
-    if _ASPECT_ENCODER is None:
+    cached = _ASPECT_ENCODER_BY_MODEL.get(model_name)
+    if cached is not None:
+        return cached
+    if model_name not in _ASPECT_ENCODER_BY_MODEL:
         try:
             from sentence_transformers import SentenceTransformer
 
-            _ASPECT_ENCODER = SentenceTransformer(model_name)
+            _ASPECT_ENCODER_BY_MODEL[model_name] = SentenceTransformer(model_name)
         except Exception:
-            _ASPECT_ENCODER = False
-    return _ASPECT_ENCODER
+            _ASPECT_ENCODER_BY_MODEL[model_name] = False
+    return _ASPECT_ENCODER_BY_MODEL[model_name]
 
 
 def compute_aspect_document_similarity(aspect: str, doc: RetrievedDocument, encoder=None) -> float:
@@ -457,7 +532,6 @@ def embed_corpus_texts(
                 doc_id=raw_doc["doc_id"],
                 text=raw_doc["text"],
                 retrieval_score=float(raw_doc.get("retrieval_score", 0.0)),
-                supportiveness_score=float(raw_doc.get("supportiveness_score", 0.5)),
                 embedding=list(embedding),
             )
         )
@@ -487,7 +561,6 @@ def load_hotpotqa_sample(start: int = 0, limit: int = 50, split: str = "validati
                 {
                     "doc_id": doc_id,
                     "text": f"{title}. {text}",
-                    "supportiveness_score": 0.5,
                 }
             )
     return raw_docs
@@ -497,7 +570,7 @@ def load_hotpotqa_queries(start: int = 0, limit: int = 5, split: str = "validati
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split=f"{split}[{start}:{start + limit}]")
-    return [Query(text=item["question"], answer=item["answer"]) for item in dataset]
+    return [Query(text=item["question"], answer=item["answer"], answers=[item["answer"]]) for item in dataset]
 
 
 def _extract_nq_document_tokens(item: dict) -> List[str]:
@@ -528,7 +601,7 @@ def _extract_nq_document_tokens(item: dict) -> List[str]:
     return []
 
 
-def _extract_nq_short_answer_text(item: dict) -> Optional[str]:
+def _extract_nq_short_answer_texts(item: dict) -> List[str]:
     annotations = item.get("annotations")
     candidate_answers: List[dict] = []
 
@@ -545,12 +618,14 @@ def _extract_nq_short_answer_text(item: dict) -> Optional[str]:
                 candidate_answers.extend([answer for answer in raw if isinstance(answer, dict)])
 
     if not candidate_answers:
-        return None
+        return []
 
+    outputs: List[str] = []
     for answer in candidate_answers:
         answer_text = answer.get("text")
         if isinstance(answer_text, str) and answer_text.strip():
-            return answer_text.strip()
+            outputs.append(answer_text.strip())
+            continue
 
         start_token = answer.get("start_token")
         end_token = answer.get("end_token")
@@ -561,8 +636,10 @@ def _extract_nq_short_answer_text(item: dict) -> Optional[str]:
                 span = tokens[start_token:clipped_end]
                 span_text = " ".join(token for token in span if token).strip()
                 if span_text:
-                    return span_text
-    return None
+                    outputs.append(span_text)
+
+    deduped = list(dict.fromkeys(outputs))
+    return deduped
 
 
 def load_nq_sample(start: int = 0, limit: int = 50, split: str = "validation") -> List[dict]:
@@ -580,7 +657,6 @@ def load_nq_sample(start: int = 0, limit: int = 50, split: str = "validation") -
             {
                 "doc_id": f"nq_{item_idx}",
                 "text": doc_text,
-                "supportiveness_score": 0.5,
                 "question_hint": question_text,
             }
         )
@@ -594,8 +670,9 @@ def load_nq_queries(start: int = 0, limit: int = 5, split: str = "validation") -
     queries: List[Query] = []
     for item in dataset:
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
-        answer_text = _extract_nq_short_answer_text(item)
-        queries.append(Query(text=question_text, answer=answer_text))
+        answers = _extract_nq_short_answer_texts(item)
+        answer_text = answers[0] if answers else None
+        queries.append(Query(text=question_text, answer=answer_text, answers=answers))
     return queries
 
 
@@ -605,46 +682,41 @@ def build_demo_corpus() -> List[RetrievedDocument]:
             doc_id="doc_1",
             text="Michael Phelps was born on June 30, 1985.",
             retrieval_score=0.92,
-            supportiveness_score=0.95,
             embedding=[0.9, 0.1, 0.1],
         ),
         RetrievedDocument(
             doc_id="doc_2",
             text="Phelps is an American former competitive swimmer.",
             retrieval_score=0.89,
-            supportiveness_score=0.60,
             embedding=[0.88, 0.12, 0.1],
         ),
         RetrievedDocument(
             doc_id="doc_3",
             text="Phelps won many Olympic gold medals.",
             retrieval_score=0.85,
-            supportiveness_score=0.45,
             embedding=[0.87, 0.1, 0.12],
         ),
         RetrievedDocument(
             doc_id="doc_4",
             text="The birthday of Michael Phelps is June 30, 1985.",
             retrieval_score=0.84,
-            supportiveness_score=0.96,
             embedding=[0.91, 0.11, 0.08],
         ),
         RetrievedDocument(
             doc_id="doc_5",
             text="Michael Phelps was born in Baltimore, Maryland.",
             retrieval_score=0.81,
-            supportiveness_score=0.70,
             embedding=[0.55, 0.5, 0.2],
         ),
     ]
 
 
-def build_silver_label(initial_correct: bool, expanded_correct: bool) -> int:
+def build_silver_label(initial_correct: bool, expanded_correct: bool) -> Optional[int]:
     # Sufficient if weak support is already present in D.
     if initial_correct:
         return 1
     # Insufficient if support appears only after expansion.
     if expanded_correct:
         return 0
-    # Also insufficient when support is absent in both D and D+.
-    return 0
+    # Unknown when support is absent in both D and D+.
+    return None

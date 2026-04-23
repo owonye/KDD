@@ -1,5 +1,7 @@
 import argparse
 import csv
+import glob
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -64,15 +66,43 @@ def print_summary(grouped: dict[str, dict[str, float]], reason_counts: dict[str,
         print(f"{name}: {joined}")
 
 
+def _parse_mode_size_from_source(path_str: str) -> tuple[str, str]:
+    name = Path(path_str).name
+    match = re.match(r"eval_(hotpotqa|nq)_(\d+)", name)
+    if not match:
+        return "unknown", "unknown"
+    return match.group(1), match.group(2)
+
+
+def _baseline_order(name: str) -> int:
+    order = {
+        "structure_aware_adaptive_rag": 0,
+        "structure_aware_wo_relevance": 1,
+        "structure_aware_wo_redundancy": 2,
+        "structure_aware_wo_coverage": 3,
+        "structure_aware_wo_supportiveness": 4,
+    }
+    return order.get(name, 99)
+
+
 def write_ablation_summary(rows: list[dict[str, str]], output: Path) -> None:
-    grouped, _ = summarize_rows(rows)
-    ablation_rows = []
-    for baseline, stats in grouped.items():
+    grouped_by_context: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        baseline = row.get("baseline", "")
         if baseline != "structure_aware_adaptive_rag" and not baseline.startswith("structure_aware_wo_"):
             continue
+        mode, size = _parse_mode_size_from_source(row.get("_source_file", ""))
+        grouped_by_context[(mode, size, baseline)].append(row)
+
+    ablation_rows = []
+    for (mode, size, baseline), group_rows in grouped_by_context.items():
+        grouped, _ = summarize_rows(group_rows)
+        stats = grouped[baseline]
         count = max(stats["count"], 1.0)
         ablation_rows.append(
             {
+                "dataset": mode,
+                "size": size,
                 "baseline": baseline,
                 "n": int(count),
                 "em": stats["exact_match_sum"] / count,
@@ -85,17 +115,17 @@ def write_ablation_summary(rows: list[dict[str, str]], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["baseline", "n", "em", "f1", "calls", "docs", "expand_rate"]
+            f, fieldnames=["dataset", "size", "baseline", "n", "em", "f1", "calls", "docs", "expand_rate"]
         )
         writer.writeheader()
-        for row in sorted(ablation_rows, key=lambda item: item["baseline"]):
+        for row in sorted(ablation_rows, key=lambda item: (item["dataset"], int(item["size"]) if str(item["size"]).isdigit() else 0, _baseline_order(item["baseline"]))):
             writer.writerow(row)
     print(f"Saved ablation summary to {output}")
 
 
 def collect_inputs(single_input: str, inputs_pattern: str) -> list[Path]:
     if inputs_pattern:
-        return sorted(Path(".").glob(inputs_pattern))
+        return sorted(Path(path) for path in glob.glob(inputs_pattern))
     return [Path(single_input)]
 
 
@@ -113,7 +143,10 @@ def main() -> None:
     for input_path in input_paths:
         if not input_path.exists():
             raise FileNotFoundError(f"Result file not found: {input_path}")
-        all_rows.extend(read_rows(input_path))
+        rows = read_rows(input_path)
+        for row in rows:
+            row["_source_file"] = str(input_path)
+        all_rows.extend(rows)
 
     grouped, reason_counts = summarize_rows(all_rows)
     print_summary(grouped, reason_counts)

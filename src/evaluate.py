@@ -47,7 +47,7 @@ def parse_baselines(raw: str) -> list[str]:
 def build_resources(args: argparse.Namespace):
     if args.mode == "demo":
         corpus = build_demo_corpus()
-        queries = [Query("When is the birthday of Michael Phelps?", answer="June 30, 1985")]
+        queries = [Query("When is the birthday of Michael Phelps?", answer="June 30, 1985", answers=["June 30, 1985"])]
         simple_retriever = SimpleRetriever(corpus)
         faiss_retriever = simple_retriever
     elif args.mode == "hotpotqa":
@@ -68,7 +68,11 @@ def build_resources(args: argparse.Namespace):
             "Non-demo evaluation requires real QA generation. Use --use-openai or pass --allow-simple-generator explicitly."
         )
 
-    generator = OpenAIGenerator(model=args.openai_model) if args.use_openai else SimpleGenerator()
+    generator = (
+        OpenAIGenerator(model=args.openai_model, cache_path=args.openai_cache_path)
+        if args.use_openai
+        else SimpleGenerator()
+    )
 
     return corpus, queries, simple_retriever, faiss_retriever, generator
 
@@ -105,12 +109,16 @@ def f1_score(prediction: str, gold: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def add_metrics(row: dict[str, Any], query: Query) -> dict[str, Any]:
+def add_metrics(row: dict[str, Any], query: Query, generator_type: str) -> dict[str, Any]:
     row = row.copy()
-    row["gold_answer"] = query.answer
-    if query.answer:
-        row["exact_match"] = exact_match_score(row["answer"], query.answer)
-        row["f1"] = f1_score(row["answer"], query.answer)
+    gold_answers = query.answers if query.answers else ([query.answer] if query.answer else [])
+    row["gold_answer"] = " || ".join(gold_answers) if gold_answers else None
+    if generator_type == "simple_placeholder":
+        row["exact_match"] = None
+        row["f1"] = None
+    elif gold_answers:
+        row["exact_match"] = max(exact_match_score(row["answer"], gold) for gold in gold_answers)
+        row["f1"] = max(f1_score(row["answer"], gold) for gold in gold_answers)
     else:
         row["exact_match"] = None
         row["f1"] = None
@@ -282,6 +290,8 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
             f,
             fieldnames=[
                 "query_id",
+                "generator_type",
+                "model_version",
                 "baseline",
                 "query",
                 "decision",
@@ -315,6 +325,7 @@ def main() -> None:
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--allow-simple-generator", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
+    parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=100)
@@ -339,18 +350,32 @@ def main() -> None:
     set_global_seed(args.seed)
 
     _, queries, simple_retriever, _, generator = build_resources(args)
+    generator_type = "openai" if args.use_openai else "simple_placeholder"
+    model_version = args.openai_model if args.use_openai else "simple_placeholder"
     estimator, structure_aware_name = load_estimator(args)
     selected_baselines = set(parse_baselines(args.baselines))
 
     rows: list[dict[str, Any]] = []
     for query_id, query in enumerate(queries):
         if "vanilla_rag" in selected_baselines:
-            row = add_metrics(run_vanilla(query, simple_retriever, generator, top_k=args.initial_k), query)
+            row = add_metrics(
+                run_vanilla(query, simple_retriever, generator, top_k=args.initial_k),
+                query,
+                generator_type=generator_type,
+            )
             row["query_id"] = query_id
+            row["generator_type"] = generator_type
+            row["model_version"] = model_version
             rows.append(row)
         if "fixed_large_k_rag" in selected_baselines:
-            row = add_metrics(run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k), query)
+            row = add_metrics(
+                run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k),
+                query,
+                generator_type=generator_type,
+            )
             row["query_id"] = query_id
+            row["generator_type"] = generator_type
+            row["model_version"] = model_version
             rows.append(row)
         if "confidence_adaptive_rag" in selected_baselines:
             row = add_metrics(
@@ -363,8 +388,11 @@ def main() -> None:
                     threshold=args.confidence_threshold,
                 ),
                 query,
+                generator_type=generator_type,
             )
             row["query_id"] = query_id
+            row["generator_type"] = generator_type
+            row["model_version"] = model_version
             rows.append(row)
         if "structure_aware_adaptive_rag" in selected_baselines:
             row = add_metrics(
@@ -379,8 +407,11 @@ def main() -> None:
                     baseline_name=structure_aware_name,
                 ),
                 query,
+                generator_type=generator_type,
             )
             row["query_id"] = query_id
+            row["generator_type"] = generator_type
+            row["model_version"] = model_version
             rows.append(row)
 
     output_path = Path(args.output)
@@ -392,6 +423,9 @@ def main() -> None:
             "args": vars(args),
             "num_queries": len(queries),
             "num_rows": len(rows),
+            "generator_type": generator_type,
+            "model_version": model_version,
+            "openai_cache_stats": generator.get_cache_stats() if args.use_openai else None,
             "output": str(output_path),
         },
     )

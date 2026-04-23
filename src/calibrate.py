@@ -37,7 +37,7 @@ def build_resources(
 ):
     if mode == "demo":
         corpus = build_demo_corpus()
-        queries = [Query("When is the birthday of Michael Phelps?", answer="June 30, 1985")]
+        queries = [Query("When is the birthday of Michael Phelps?", answer="June 30, 1985", answers=["June 30, 1985"])]
         retriever = SimpleRetriever(corpus)
         return queries, retriever
 
@@ -62,14 +62,36 @@ def normalize_answer(text: str) -> str:
     return text
 
 
+def f1_score(prediction: str, gold: str) -> float:
+    pred_tokens = normalize_answer(prediction).split()
+    gold_tokens = normalize_answer(gold).split()
+    if not pred_tokens and not gold_tokens:
+        return 1.0
+    if not pred_tokens or not gold_tokens:
+        return 0.0
+    common = {}
+    for token in pred_tokens:
+        common[token] = min(pred_tokens.count(token), gold_tokens.count(token))
+    num_same = sum(common.values())
+    if num_same == 0:
+        return 0.0
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(gold_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
 def evidence_has_weak_support(query: Query, docs, overlap_threshold: float) -> bool:
-    if not query.answer:
+    gold_answers = query.answers if query.answers else ([query.answer] if query.answer else [])
+    if not gold_answers:
         return False
-    gold = normalize_answer(query.answer)
-    if not gold:
+    normalized_gold = [normalize_answer(answer) for answer in gold_answers if answer]
+    normalized_gold = [answer for answer in normalized_gold if answer]
+    if not normalized_gold:
         return False
     for doc in docs:
-        if gold in normalize_answer(doc.text) and compute_query_overlap(query, doc) >= overlap_threshold:
+        doc_text = normalize_answer(doc.text)
+        has_match = any(gold in doc_text for gold in normalized_gold)
+        if has_match and compute_query_overlap(query, doc) >= overlap_threshold:
             return True
     return False
 
@@ -125,13 +147,17 @@ def label_from_hybrid_generation(
     initial_support = evidence_has_weak_support(query, initial_docs, overlap_threshold=overlap_threshold)
     expanded_support = evidence_has_weak_support(query, expanded_docs, overlap_threshold=overlap_threshold)
 
-    if query.answer:
+    gold_answers = query.answers if query.answers else ([query.answer] if query.answer else [])
+    if gold_answers:
         initial_answer = generator.generate(query, initial_docs)
         expanded_answer = generator.generate(query, expanded_docs)
-        initial_em = 1 if normalize_answer(initial_answer) == normalize_answer(query.answer) else 0
-        expanded_em = 1 if normalize_answer(expanded_answer) == normalize_answer(query.answer) else 0
-        initial_good = initial_support and initial_em == 1
-        expanded_good = expanded_support and expanded_em == 1
+        normalized_gold = [normalize_answer(answer) for answer in gold_answers if answer]
+        initial_em = 1 if any(normalize_answer(initial_answer) == gold for gold in normalized_gold) else 0
+        expanded_em = 1 if any(normalize_answer(expanded_answer) == gold for gold in normalized_gold) else 0
+        initial_f1 = max(f1_score(initial_answer, gold) for gold in gold_answers)
+        expanded_f1 = max(f1_score(expanded_answer, gold) for gold in gold_answers)
+        initial_good = initial_support and (initial_em == 1 or initial_f1 >= 0.8)
+        expanded_good = expanded_support and (expanded_em == 1 or expanded_f1 >= 0.8)
         return initial_features, build_silver_label(initial_good, expanded_good)
 
     return initial_features, build_silver_label(initial_support, expanded_support)
@@ -155,6 +181,7 @@ def main() -> None:
     parser.add_argument("--label-strategy", choices=["evidence", "hybrid_generation"], default="evidence")
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
+    parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--ablate-signal",
@@ -179,7 +206,8 @@ def main() -> None:
         raise ValueError("hybrid_generation label strategy requires --use-openai.")
 
     examples = []
-    generator = OpenAIGenerator(model=args.openai_model) if args.use_openai else None
+    excluded_no_support = 0
+    generator = OpenAIGenerator(model=args.openai_model, cache_path=args.openai_cache_path) if args.use_openai else None
     for query in queries:
         if args.label_strategy == "hybrid_generation":
             initial_features, silver_label = label_from_hybrid_generation(
@@ -200,6 +228,9 @@ def main() -> None:
                 overlap_threshold=args.weak_support_overlap_threshold,
                 embedding_model=args.embedding_model,
             )
+        if silver_label is None:
+            excluded_no_support += 1
+            continue
         examples.append((initial_features, silver_label))
 
     best = None
@@ -233,6 +264,7 @@ def main() -> None:
                 "threshold": threshold,
                 "silver_accuracy": acc,
                 "num_examples": len(examples),
+                "excluded_no_support": excluded_no_support,
                 "weak_support_overlap_threshold": args.weak_support_overlap_threshold,
                 "ablate_signal": args.ablate_signal,
                 "label_strategy": args.label_strategy,
@@ -255,6 +287,10 @@ def main() -> None:
             "args": vars(args),
             "num_queries": len(queries),
             "num_examples": len(examples),
+            "excluded_no_support": excluded_no_support,
+            "generator_type": "openai" if args.use_openai else "simple",
+            "model_version": args.openai_model if args.use_openai else "simple_placeholder",
+            "openai_cache_stats": generator.get_cache_stats() if generator else None,
             "output": str(output_path),
         },
     )
