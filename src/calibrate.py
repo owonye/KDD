@@ -35,6 +35,7 @@ def build_resources(
     query_limit: int,
     query_split: str,
     embedding_model: str,
+    retrieval_cache_dir: str,
 ):
     if mode == "demo":
         corpus = build_demo_corpus()
@@ -44,15 +45,37 @@ def build_resources(
 
     if mode == "hotpotqa":
         raw_docs = load_hotpotqa_sample(start=doc_start, limit=doc_limit, split=corpus_split)
-        corpus = embed_corpus_texts(raw_docs, model_name=embedding_model)
+        cache_namespace = f"hotpotqa::{corpus_split}::{doc_start}:{doc_start + doc_limit}"
+        corpus = embed_corpus_texts(
+            raw_docs,
+            model_name=embedding_model,
+            cache_dir=retrieval_cache_dir,
+            cache_namespace=cache_namespace,
+        )
         queries = load_hotpotqa_queries(start=query_start, limit=query_limit, split=query_split)
-        retriever = FaissRetriever(corpus, model_name=embedding_model)
+        retriever = FaissRetriever(
+            corpus,
+            model_name=embedding_model,
+            cache_dir=retrieval_cache_dir,
+            cache_namespace=cache_namespace,
+        )
         return queries, retriever
 
     raw_docs = load_nq_sample(start=doc_start, limit=doc_limit, split=corpus_split)
-    corpus = embed_corpus_texts(raw_docs, model_name=embedding_model)
+    cache_namespace = f"nq::{corpus_split}::{doc_start}:{doc_start + doc_limit}"
+    corpus = embed_corpus_texts(
+        raw_docs,
+        model_name=embedding_model,
+        cache_dir=retrieval_cache_dir,
+        cache_namespace=cache_namespace,
+    )
     queries = load_nq_queries(start=query_start, limit=query_limit, split=query_split)
-    retriever = FaissRetriever(corpus, model_name=embedding_model)
+    retriever = FaissRetriever(
+        corpus,
+        model_name=embedding_model,
+        cache_dir=retrieval_cache_dir,
+        cache_namespace=cache_namespace,
+    )
     return queries, retriever
 
 
@@ -73,6 +96,7 @@ def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
     args.expanded_k = int(manifest["expanded_k"])
     args.embedding_model = str(manifest["embedding_model"])
     args.seed = int(manifest["seed"])
+    args.retrieval_cache_dir = str(manifest.get("retrieval_cache_dir", args.retrieval_cache_dir))
     if args.label_strategy == "evidence":
         args.label_strategy = str(manifest.get("label_strategy", args.label_strategy))
     return args
@@ -205,6 +229,7 @@ def main() -> None:
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
+    parser.add_argument("--retrieval-cache-dir", default="results/cache")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--confidence-calibration-out", default="")
@@ -227,6 +252,7 @@ def main() -> None:
         args.query_limit,
         args.query_split,
         args.embedding_model,
+        args.retrieval_cache_dir,
     )
     if args.label_strategy == "hybrid_generation" and not args.use_openai:
         raise ValueError("hybrid_generation label strategy requires --use-openai.")
@@ -308,6 +334,7 @@ def main() -> None:
                 "seed": args.seed,
                 "query_ids": [query.query_id for query in queries if query.query_id],
                 "generator_prompt_version": "evidence_only_v1",
+                "retrieval_cache_dir": args.retrieval_cache_dir,
             }
 
     # Confidence baseline calibration from the same silver labels.
@@ -350,6 +377,7 @@ def main() -> None:
                 "manifest_id": args.manifest_id,
                 "initial_k": args.initial_k,
                 "expanded_k": args.expanded_k,
+                "retrieval_cache_dir": args.retrieval_cache_dir,
             }
 
     output_path = Path(args.output)

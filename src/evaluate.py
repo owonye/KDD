@@ -52,15 +52,37 @@ def build_resources(args: argparse.Namespace):
         faiss_retriever = simple_retriever
     elif args.mode == "hotpotqa":
         raw_docs = load_hotpotqa_sample(start=args.doc_start, limit=args.doc_limit, split=args.corpus_split)
-        corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
+        cache_namespace = f"hotpotqa::{args.corpus_split}::{args.doc_start}:{args.doc_start + args.doc_limit}"
+        corpus = embed_corpus_texts(
+            raw_docs,
+            model_name=args.embedding_model,
+            cache_dir=args.retrieval_cache_dir,
+            cache_namespace=cache_namespace,
+        )
         queries = load_hotpotqa_queries(start=args.query_start, limit=args.query_limit, split=args.query_split)
-        simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
+        simple_retriever = FaissRetriever(
+            corpus,
+            model_name=args.embedding_model,
+            cache_dir=args.retrieval_cache_dir,
+            cache_namespace=cache_namespace,
+        )
         faiss_retriever = simple_retriever
     else:
         raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit, split=args.corpus_split)
-        corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
+        cache_namespace = f"nq::{args.corpus_split}::{args.doc_start}:{args.doc_start + args.doc_limit}"
+        corpus = embed_corpus_texts(
+            raw_docs,
+            model_name=args.embedding_model,
+            cache_dir=args.retrieval_cache_dir,
+            cache_namespace=cache_namespace,
+        )
         queries = load_nq_queries(start=args.query_start, limit=args.query_limit, split=args.query_split)
-        simple_retriever = FaissRetriever(corpus, model_name=args.embedding_model)
+        simple_retriever = FaissRetriever(
+            corpus,
+            model_name=args.embedding_model,
+            cache_dir=args.retrieval_cache_dir,
+            cache_namespace=cache_namespace,
+        )
         faiss_retriever = simple_retriever
 
     if args.mode != "demo" and not args.use_openai and not args.allow_simple_generator:
@@ -93,6 +115,7 @@ def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
     args.expanded_k = int(manifest["expanded_k"])
     args.embedding_model = str(manifest["embedding_model"])
     args.seed = int(manifest["seed"])
+    args.retrieval_cache_dir = str(manifest.get("retrieval_cache_dir", args.retrieval_cache_dir))
     return args
 
 
@@ -395,6 +418,7 @@ def main() -> None:
     parser.add_argument("--allow-simple-generator", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
+    parser.add_argument("--retrieval-cache-dir", default="results/cache")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=20000)
@@ -521,6 +545,7 @@ def main() -> None:
             "generator_type": generator_type,
             "model_version": model_version,
             "openai_cache_stats": generator.get_cache_stats() if args.use_openai else None,
+            "retrieval_cache_dir": args.retrieval_cache_dir,
             "manifest_path": args.manifest_path or None,
             "manifest_id": args.manifest_id,
             "prompt_template_version": "evidence_only_v1",

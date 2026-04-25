@@ -1,72 +1,75 @@
-# KDD RAG Prototype
+# KDD Adaptive RAG Experiments
 
-## 1) 환경 설정
+논문 기본 프로토콜 기준으로 실행하는 실험 코드입니다.
 
-```powershell
-# 가상환경 생성
-python -m venv .venv
+## 1) 환경 변수
 
-# 가상환경 활성화
-.venv\Scripts\Activate.ps1
-
-# 의존성 설치
-pip install -r requirements.txt
-```
-
-프로젝트 루트 `.env` 파일:
+프로젝트 루트에 `.env`:
 
 ```dotenv
 OPENAI_API_KEY=your_api_key_here
 ```
 
-## 2) 논문용 실행 전제
+## 2) 논문 기본 프로토콜
 
-- 논문용 EM/F1 평가는 `--use-openai`를 사용해야 합니다.
-- 기본 split은 `corpus_split=train`, `query_split=validation`입니다.
-- `corpus_split != query_split`이고 `doc-slice-policy=query_union`이면 `--doc-limit`을 반드시 지정해야 합니다.
-- 결과는 `--output-dir` 아래에 저장됩니다.
+- 고정 코퍼스 슬라이스: `corpus_split=train`, `doc_start=0`, `doc_limit=20000`
+- 질의 분할: `query_split=validation`
+- one-step 정책: `k_init=3`, `k_exp=5`, `STOP/EXPAND`
+- calibration 기본: `label_strategy=evidence`
+- `query_union` 정책은 사용하지 않음
 
-## 3) 메인 실험 (권장)
-
-```powershell
-# HotpotQA: 메인 + ablation
-python src/run_experiments.py --mode hotpotqa --sizes 100,300,1000 --use-openai --run-ablation --output-dir results --doc-limit 20000 --label-strategy evidence
-
-# NQ: 메인 + ablation
-python src/run_experiments.py --mode nq --sizes 100,300,1000 --use-openai --run-ablation --output-dir results --doc-limit 20000 --label-strategy evidence
-```
-
-## 4) 선택 옵션
+## 3) 메인 실행
 
 ```powershell
-# hybrid_generation 라벨 전략(비용 증가)
-python src/run_experiments.py --mode hotpotqa --sizes 100 --use-openai --run-ablation --label-strategy hybrid_generation --output-dir results --doc-limit 20000
+# HotpotQA: 100/300/1000, 메인+ablation
+python src/run_experiments.py --mode hotpotqa --sizes 100,300,1000 --paper-defaults --use-openai --run-ablation
+
+# Natural Questions: 100/300/1000, 메인+ablation
+python src/run_experiments.py --mode nq --sizes 100,300,1000 --paper-defaults --use-openai --run-ablation
 ```
+
+## 4) 캐시 (속도 최적화)
+
+기본값으로 retrieval 캐시가 켜져 있습니다.
+
+- 캐시 루트: `results/cache`
+- 임베딩 캐시: `results/cache/embeddings/*.npz`
+- FAISS 인덱스 캐시: `results/cache/faiss/*.index`
+- 키 기준: `dataset + corpus_split + doc_range + embedding_model`
+
+동일한 코퍼스 범위로 반복 실행하면 임베딩/인덱스 재계산을 대부분 건너뜁니다.
+
+캐시 경로 변경:
 
 ```powershell
-# split/구간 수동 지정
-python src/run_experiments.py --mode hotpotqa --sizes 300 --use-openai --output-dir results --doc-limit 20000 --corpus-split train --query-split validation --calib-query-start 0 --calib-query-limit 300 --eval-query-start 300 --eval-query-limit 300
+python src/run_experiments.py --mode hotpotqa --sizes 300 --paper-defaults --use-openai --retrieval-cache-dir results/cache
 ```
 
-## 5) 결과 파일
+## 5) 출력 파일
 
-- 메인 캘리브레이션: `results/calib_<mode>_<size>.json`
-- 메인 평가: `results/eval_<mode>_<size>.csv`
-- ablation 캘리브레이션: `results/calib_<mode>_<size>_wo_<signal>.json`
-- ablation 평가: `results/eval_<mode>_<size>_wo_<signal>.csv`
-- ablation 요약표: `results/ablation_summary_<mode>_<size>.csv`
+- manifest: `results/manifest_<mode>_<size>.json`
+- 구조형 calibration: `results/calib_<mode>_<size>.json`
+- confidence calibration: `results/confidence_calib_<mode>_<size>.json`
+- 평가 CSV: `results/eval_<mode>_<size>.csv`
+- ablation calibration/eval:
+  - `results/calib_<mode>_<size>_wo_<signal>.json`
+  - `results/eval_<mode>_<size>_wo_<signal>.csv`
+- ablation 요약: `results/ablation_summary_<mode>_<size>.csv`
 - case analysis: `results/case_analysis_<mode>_<size>.csv`
-- 실행 설정 로그: `results/run_<mode>_<size>.meta.json`
-- calibrate/evaluate 설정 로그: 각 출력 파일 옆 `*.meta.json`
+- 실행 메타: `results/*.meta.json`
 
-## 6) 추가 분석 명령
+## 6) 선택 옵션
 
-```powershell
-# 여러 CSV 통합 요약 + ablation 표 저장
-python src/summarize_results.py --inputs-glob "results/eval_hotpotqa_300*.csv" --ablation-output results/ablation_summary_hotpotqa_300.csv
-```
+`hybrid_generation`은 sensitivity check 용도(비용/시간 증가):
 
 ```powershell
-# 케이스 분석 재생성
-python src/extract_case_analysis.py --input results/eval_hotpotqa_300.csv --output results/case_analysis_hotpotqa_300.csv --top-n 20
+python src/run_experiments.py --mode hotpotqa --sizes 100 --paper-defaults --use-openai --label-strategy hybrid_generation
 ```
+
+## 7) 참고
+
+비용/시간을 줄이려면:
+
+- 먼저 `--sizes 100`으로 calibration/동작 확인
+- 이후 `300`, `1000` 순서로 확대
+- 같은 `doc_start/doc_limit/split/model`을 유지해 캐시 적중률 확보

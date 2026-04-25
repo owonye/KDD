@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -200,26 +201,81 @@ class FaissRetriever:
     Embeddings are produced by a sentence-transformers model.
     """
 
-    def __init__(self, corpus: List[RetrievedDocument], model_name: str = "BAAI/bge-small-en-v1.5") -> None:
+    def __init__(
+        self,
+        corpus: List[RetrievedDocument],
+        model_name: str = "BAAI/bge-small-en-v1.5",
+        cache_dir: str = "",
+        cache_namespace: str = "",
+    ) -> None:
         import faiss
         from sentence_transformers import SentenceTransformer
 
         self.corpus = corpus
+        self.model_name = model_name
         self.encoder = SentenceTransformer(model_name)
+        self.cache_dir = cache_dir
+        self.cache_namespace = cache_namespace
 
         matrix = np.array([doc.embedding for doc in corpus], dtype="float32")
         if len(matrix.shape) != 2:
             raise ValueError("Embeddings must be a 2D matrix.")
 
         dimension = matrix.shape[1]
+        cached_index = self._load_cached_index(dimension)
+        if cached_index is not None:
+            self.index = cached_index
+            return
+
         self.index = faiss.IndexFlatIP(dimension)
         normalized = self._normalize(matrix)
         self.index.add(normalized)
+        self._save_cached_index()
 
     def _normalize(self, matrix: np.ndarray) -> np.ndarray:
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms[norms == 0.0] = 1.0
         return matrix / norms
+
+    def _doc_ids_digest(self) -> str:
+        hasher = hashlib.sha256()
+        for doc in self.corpus:
+            hasher.update(doc.doc_id.encode("utf-8"))
+            hasher.update(b"\n")
+        return hasher.hexdigest()[:16]
+
+    def _index_cache_key(self) -> str:
+        raw = f"{self.model_name}::{self.cache_namespace}::{len(self.corpus)}::{self._doc_ids_digest()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    def _index_cache_path(self) -> Optional[Path]:
+        if not self.cache_dir or not self.cache_namespace:
+            return None
+        cache_root = Path(self.cache_dir) / "faiss"
+        return cache_root / f"{self._index_cache_key()}.index"
+
+    def _load_cached_index(self, dimension: int):
+        import faiss
+
+        cache_path = self._index_cache_path()
+        if cache_path is None or not cache_path.exists():
+            return None
+        try:
+            index = faiss.read_index(str(cache_path))
+            if index.d != dimension or index.ntotal != len(self.corpus):
+                return None
+            return index
+        except Exception:
+            return None
+
+    def _save_cached_index(self) -> None:
+        import faiss
+
+        cache_path = self._index_cache_path()
+        if cache_path is None:
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.index, str(cache_path))
 
     def retrieve(self, query: Query, top_k: int) -> List[RetrievedDocument]:
         query_embedding = self.encoder.encode([query.text], normalize_embeddings=True)
@@ -530,8 +586,16 @@ class StructureAwareAdaptiveRAG:
 def embed_corpus_texts(
     raw_docs: List[dict],
     model_name: str = "BAAI/bge-small-en-v1.5",
+    cache_dir: str = "",
+    cache_namespace: str = "",
 ) -> List[RetrievedDocument]:
     from sentence_transformers import SentenceTransformer
+
+    cache_path = _embedding_cache_path(cache_dir, cache_namespace, model_name, len(raw_docs))
+    if cache_path is not None:
+        cached = _load_embedding_cache(cache_path)
+        if cached is not None:
+            return cached
 
     encoder = SentenceTransformer(model_name)
     texts = [doc["text"] for doc in raw_docs]
@@ -547,7 +611,67 @@ def embed_corpus_texts(
                 embedding=list(embedding),
             )
         )
+
+    if cache_path is not None:
+        _save_embedding_cache(cache_path, corpus)
     return corpus
+
+
+def _embedding_cache_key(cache_namespace: str, model_name: str, size: int) -> str:
+    raw = f"{cache_namespace}::{model_name}::{size}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _embedding_cache_path(
+    cache_dir: str,
+    cache_namespace: str,
+    model_name: str,
+    size: int,
+) -> Optional[Path]:
+    if not cache_dir or not cache_namespace:
+        return None
+    return Path(cache_dir) / "embeddings" / f"{_embedding_cache_key(cache_namespace, model_name, size)}.npz"
+
+
+def _load_embedding_cache(path: Path) -> Optional[List[RetrievedDocument]]:
+    if not path.exists():
+        return None
+    try:
+        data = np.load(path, allow_pickle=True)
+        doc_ids = data["doc_ids"]
+        texts = data["texts"]
+        retrieval_scores = data["retrieval_scores"]
+        embeddings = data["embeddings"]
+        if not (len(doc_ids) == len(texts) == len(retrieval_scores) == len(embeddings)):
+            return None
+        corpus: List[RetrievedDocument] = []
+        for idx in range(len(doc_ids)):
+            corpus.append(
+                RetrievedDocument(
+                    doc_id=str(doc_ids[idx]),
+                    text=str(texts[idx]),
+                    retrieval_score=float(retrieval_scores[idx]),
+                    embedding=list(np.array(embeddings[idx], dtype="float32")),
+                )
+            )
+        return corpus
+    except Exception:
+        return None
+
+
+def _save_embedding_cache(path: Path, corpus: List[RetrievedDocument]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc_ids = np.array([doc.doc_id for doc in corpus], dtype=object)
+    texts = np.array([doc.text for doc in corpus], dtype=object)
+    retrieval_scores = np.array([doc.retrieval_score for doc in corpus], dtype="float32")
+    embeddings = np.array([doc.embedding for doc in corpus], dtype="float32")
+    np.savez_compressed(
+        path,
+        doc_ids=doc_ids,
+        texts=texts,
+        retrieval_scores=retrieval_scores,
+        embeddings=embeddings,
+    )
 
 
 def load_hotpotqa_sample(start: int = 0, limit: int = 50, split: str = "validation") -> List[dict]:

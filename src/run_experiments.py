@@ -66,6 +66,7 @@ def main() -> None:
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
+    parser.add_argument("--retrieval-cache-dir", default="results/cache")
     parser.add_argument("--allow-simple-generator", action="store_true")
     args = parser.parse_args()
 
@@ -128,6 +129,7 @@ def main() -> None:
                 "embedding_model": args.embedding_model,
                 "seed": args.seed,
                 "prompt_version": "v1_evidence_only",
+                "retrieval_cache_dir": args.retrieval_cache_dir,
             },
         )
 
@@ -156,6 +158,8 @@ def main() -> None:
             args.query_split,
             "--embedding-model",
             args.embedding_model,
+            "--retrieval-cache-dir",
+            args.retrieval_cache_dir,
             "--initial-k",
             str(args.initial_k),
             "--expanded-k",
@@ -204,6 +208,8 @@ def main() -> None:
             args.query_split,
             "--embedding-model",
             args.embedding_model,
+            "--retrieval-cache-dir",
+            args.retrieval_cache_dir,
             "--initial-k",
             str(args.initial_k),
             "--expanded-k",
@@ -260,6 +266,8 @@ def main() -> None:
                     args.query_split,
                     "--embedding-model",
                     args.embedding_model,
+                    "--retrieval-cache-dir",
+                    args.retrieval_cache_dir,
                     "--initial-k",
                     str(args.initial_k),
                     "--expanded-k",
@@ -308,6 +316,8 @@ def main() -> None:
                     args.query_split,
                     "--embedding-model",
                     args.embedding_model,
+                    "--retrieval-cache-dir",
+                    args.retrieval_cache_dir,
                     "--initial-k",
                     str(args.initial_k),
                     "--expanded-k",
@@ -390,6 +400,7 @@ def main() -> None:
                 "doc_limit": args.doc_limit,
                 "corpus_split": args.corpus_split,
                 "query_split": args.query_split,
+                "retrieval_cache_dir": args.retrieval_cache_dir,
                 "manifest_path": str(manifest_path),
                 "manifest_id": manifest["manifest_id"],
                 "prompt_version": manifest["prompt_version"],
