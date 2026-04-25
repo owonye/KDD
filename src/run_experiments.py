@@ -1,9 +1,14 @@
 import argparse
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
+import re
 
 from experiment_utils import write_manifest, write_run_config
+
+DEFAULT_OPENAI_CACHE_PATH = "results/openai_cache.jsonl"
+DEFAULT_RETRIEVAL_CACHE_DIR = "results/cache"
 
 
 def parse_sizes(raw: str) -> list[int]:
@@ -35,6 +40,24 @@ def parse_signal_list(raw: str) -> list[str]:
     return values
 
 
+def slugify(value: str, max_len: int = 60) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    if not normalized:
+        return "run"
+    return normalized[:max_len].strip("-") or "run"
+
+
+def build_run_subdir_name(args: argparse.Namespace, sizes: list[int]) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    size_token = "x".join(str(size) for size in sizes)
+    base_name = f"{timestamp}_{args.mode}_s{size_token}_{args.label_strategy}"
+    if args.run_ablation:
+        base_name += "_ablation"
+    if args.run_name:
+        base_name += f"_{slugify(args.run_name)}"
+    return slugify(base_name, max_len=120)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["hotpotqa", "nq"], required=True)
@@ -63,10 +86,12 @@ def main() -> None:
     parser.add_argument("--manifest-out", default="")
     parser.add_argument("--confidence-calibration-out", default="")
     parser.add_argument("--output-dir", default="results")
+    parser.add_argument("--use-run-subdir", action="store_true")
+    parser.add_argument("--run-name", default="")
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
-    parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
-    parser.add_argument("--retrieval-cache-dir", default="results/cache")
+    parser.add_argument("--openai-cache-path", default=DEFAULT_OPENAI_CACHE_PATH)
+    parser.add_argument("--retrieval-cache-dir", default=DEFAULT_RETRIEVAL_CACHE_DIR)
     parser.add_argument("--allow-simple-generator", action="store_true")
     args = parser.parse_args()
 
@@ -88,8 +113,18 @@ def main() -> None:
 
     sizes = parse_sizes(args.sizes)
     ablation_signals = parse_signal_list(args.ablation_signals)
-    output_dir = Path(args.output_dir)
+    output_base_dir = Path(args.output_dir)
+    output_dir = output_base_dir / build_run_subdir_name(args, sizes) if args.use_run_subdir else output_base_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.use_run_subdir and args.openai_cache_path == DEFAULT_OPENAI_CACHE_PATH:
+        args.openai_cache_path = str(output_dir / "openai_cache.jsonl")
+    if args.use_run_subdir and args.retrieval_cache_dir == DEFAULT_RETRIEVAL_CACHE_DIR:
+        args.retrieval_cache_dir = str(output_dir / "cache")
+
+    print(f"[INFO] Output directory: {output_dir}")
+    print(f"[INFO] OpenAI cache path: {args.openai_cache_path}")
+    print(f"[INFO] Retrieval cache directory: {args.retrieval_cache_dir}")
 
     for size in sizes:
         calib_path = output_dir / f"calib_{args.mode}_{size}.json"
