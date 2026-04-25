@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import time
 from itertools import product
 from pathlib import Path
 
@@ -243,6 +244,32 @@ def main() -> None:
     args = resolve_manifest_overrides(args)
     set_global_seed(args.seed)
 
+    def _format_eta(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0
+        total = int(seconds)
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _maybe_log_progress(stage: str, completed: int, total: int, started_at: float, force: bool = False) -> None:
+        if total <= 0:
+            return
+        interval = max(1, total // 20)  # ~5% step
+        if not force and completed % interval != 0 and completed != total:
+            return
+        elapsed = max(time.time() - started_at, 1e-9)
+        rate = completed / elapsed
+        remaining = max(total - completed, 0)
+        eta = remaining / rate if rate > 0 else 0.0
+        progress = (completed / total) * 100
+        print(
+            f"[PROGRESS] {stage}: {completed}/{total} ({progress:.1f}%) "
+            f"elapsed={_format_eta(elapsed)} eta={_format_eta(eta)}"
+        )
+
     queries, retriever = build_resources(
         args.mode,
         args.doc_start,
@@ -260,7 +287,9 @@ def main() -> None:
     examples = []
     excluded_no_support = 0
     generator = OpenAIGenerator(model=args.openai_model, cache_path=args.openai_cache_path) if args.use_openai else None
-    for query in queries:
+    total_queries = len(queries)
+    stage_started = time.time()
+    for idx, query in enumerate(queries, start=1):
         if args.label_strategy == "hybrid_generation":
             initial_features, silver_label = label_from_hybrid_generation(
                 query,
@@ -282,8 +311,9 @@ def main() -> None:
             )
         if silver_label is None:
             excluded_no_support += 1
-            continue
-        examples.append((initial_features, silver_label))
+        else:
+            examples.append((initial_features, silver_label))
+        _maybe_log_progress("calibration_labels", idx, total_queries, stage_started)
 
     best = None
     best_acc = -1.0
@@ -342,7 +372,8 @@ def main() -> None:
     confidence_best_acc = -1.0
     confidence_threshold_grid = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
     confidence_examples = []
-    for query in queries:
+    stage_started = time.time()
+    for idx, query in enumerate(queries, start=1):
         initial_docs = retriever.retrieve(query, args.initial_k)
         expanded_docs = retriever.retrieve(query, args.expanded_k)
         initial_correct = evidence_has_weak_support(query, initial_docs, overlap_threshold=args.weak_support_overlap_threshold)
@@ -358,6 +389,7 @@ def main() -> None:
         score_gap = top1_score - top2_score
         confidence_score = 0.5 * top1_score + 0.4 * avg_score + 0.1 * score_gap
         confidence_examples.append((confidence_score, label))
+        _maybe_log_progress("confidence_labels", idx, total_queries, stage_started)
 
     for threshold in confidence_threshold_grid:
         correct = 0
@@ -409,6 +441,10 @@ def main() -> None:
     print(f"Saved calibration to {output_path}")
     print(json.dumps(best, indent=2))
     print(f"Saved confidence calibration to {confidence_output}")
+    print(
+        f"[DONE] calibration_labels={len(examples)}/{total_queries} "
+        f"excluded_no_support={excluded_no_support}"
+    )
 
 
 if __name__ == "__main__":

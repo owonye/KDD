@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -445,6 +446,32 @@ def main() -> None:
         raise ValueError("For paper-grade EM/F1, run evaluate.py with --use-openai.")
     set_global_seed(args.seed)
 
+    def _format_eta(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0
+        total = int(seconds)
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _maybe_log_progress(stage: str, completed: int, total: int, started_at: float, force: bool = False) -> None:
+        if total <= 0:
+            return
+        interval = max(1, total // 20)  # ~5% step
+        if not force and completed % interval != 0 and completed != total:
+            return
+        elapsed = max(time.time() - started_at, 1e-9)
+        rate = completed / elapsed
+        remaining = max(total - completed, 0)
+        eta = remaining / rate if rate > 0 else 0.0
+        progress = (completed / total) * 100
+        print(
+            f"[PROGRESS] {stage}: {completed}/{total} ({progress:.1f}%) "
+            f"elapsed={_format_eta(elapsed)} eta={_format_eta(eta)}"
+        )
+
     _, queries, simple_retriever, _, generator = build_resources(args)
     generator_type = "openai" if args.use_openai else "simple_placeholder"
     model_version = args.openai_model if args.use_openai else "simple_placeholder"
@@ -455,6 +482,8 @@ def main() -> None:
     label_strategy = calibration_config.get("label_strategy", "default")
 
     rows: list[dict[str, Any]] = []
+    total_queries = len(queries)
+    stage_started = time.time()
     for query_id, query in enumerate(queries):
         if "vanilla_rag" in selected_baselines:
             row = add_metrics(
@@ -532,6 +561,7 @@ def main() -> None:
             row["label_strategy"] = label_strategy
             row["calibration_source"] = calibration_source
             rows.append(row)
+        _maybe_log_progress("evaluate_queries", query_id + 1, total_queries, stage_started)
 
     output_path = Path(args.output)
     write_results(rows, output_path)
@@ -558,6 +588,9 @@ def main() -> None:
     )
 
     print(f"Saved results to {output_path}")
+    print(
+        f"[DONE] evaluate_queries={total_queries} baselines={len(selected_baselines)} rows={len(rows)}"
+    )
     for row in rows[:4]:
         print(row["baseline"], row["decision"], row["doc_count"], row["retrieval_calls"])
 
