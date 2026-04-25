@@ -16,6 +16,7 @@ CONTENT_STOPWORDS = {
     "were", "the", "a", "an", "of", "in", "on", "for", "to", "did", "do", "does",
     "and", "or", "with", "by", "from", "as", "at",
 }
+SUPPORTIVENESS_LAMBDA = 0.5
 
 
 @dataclass
@@ -23,6 +24,7 @@ class Query:
     text: str
     answer: Optional[str] = None
     answers: Optional[List[str]] = None
+    query_id: Optional[str] = None
 
 
 @dataclass
@@ -375,7 +377,7 @@ def estimate_supportiveness(query: Query, docs: List[RetrievedDocument], normali
     scores: List[float] = []
     for doc, normalized_score in zip(docs, normalized_scores):
         overlap_score = compute_query_overlap(query, doc)
-        blended_score = 0.5 * normalized_score + 0.5 * overlap_score
+        blended_score = SUPPORTIVENESS_LAMBDA * normalized_score + (1.0 - SUPPORTIVENESS_LAMBDA) * overlap_score
         scores.append(blended_score)
     return max(scores) if scores else 0.0
 
@@ -497,6 +499,11 @@ class StructureAwareAdaptiveRAG:
                 "decision": "answer_now",
                 "reason": decision.reason,
                 "used_docs": [doc.doc_id for doc in initial_docs],
+                "initial_doc_ids": [doc.doc_id for doc in initial_docs],
+                "final_doc_ids": [doc.doc_id for doc in initial_docs],
+                "expanded_doc_ids": [],
+                "expansion_triggered": False,
+                "final_doc_count": len(initial_docs),
                 "features": decision.features,
                 "sufficiency_score": decision.sufficiency_score,
                 "answer": answer,
@@ -509,6 +516,11 @@ class StructureAwareAdaptiveRAG:
             "decision": "retrieve_more",
             "reason": decision.reason,
             "used_docs": [doc.doc_id for doc in expanded_docs],
+            "initial_doc_ids": [doc.doc_id for doc in initial_docs],
+            "final_doc_ids": [doc.doc_id for doc in expanded_docs],
+            "expanded_doc_ids": [doc.doc_id for doc in expanded_docs],
+            "expansion_triggered": True,
+            "final_doc_count": len(expanded_docs),
             "features": decision.features,
             "sufficiency_score": decision.sufficiency_score,
             "answer": answer,
@@ -546,11 +558,13 @@ def load_hotpotqa_sample(start: int = 0, limit: int = 50, split: str = "validati
     raw_docs: List[dict] = []
     seen_ids = set()
     for item_idx, item in enumerate(dataset):
+        absolute_item_idx = start + item_idx
         contexts = item["context"]
         titles = contexts["title"]
         sentences = contexts["sentences"]
         for passage_idx, (title, sentence_list) in enumerate(zip(titles, sentences)):
-            doc_id = f"{item_idx}_{passage_idx}_{title}"
+            normalized_title = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+            doc_id = f"hotpotqa::{split}::{absolute_item_idx}::{passage_idx}::{normalized_title}"
             if doc_id in seen_ids:
                 continue
             seen_ids.add(doc_id)
@@ -570,7 +584,11 @@ def load_hotpotqa_queries(start: int = 0, limit: int = 5, split: str = "validati
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split=f"{split}[{start}:{start + limit}]")
-    return [Query(text=item["question"], answer=item["answer"], answers=[item["answer"]]) for item in dataset]
+    queries: List[Query] = []
+    for local_idx, item in enumerate(dataset):
+        query_uid = f"hotpotqa::{split}::{start + local_idx}"
+        queries.append(Query(text=item["question"], answer=item["answer"], answers=[item["answer"]], query_id=query_uid))
+    return queries
 
 
 def _extract_nq_document_tokens(item: dict) -> List[str]:
@@ -649,13 +667,14 @@ def load_nq_sample(start: int = 0, limit: int = 50, split: str = "validation") -
 
     raw_docs: List[dict] = []
     for item_idx, item in enumerate(dataset):
+        absolute_item_idx = start + item_idx
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
         doc_text = item.get("document", {}).get("text", "") if isinstance(item.get("document"), dict) else item.get("document", "")
         if not doc_text:
             continue
         raw_docs.append(
             {
-                "doc_id": f"nq_{item_idx}",
+                "doc_id": f"nq::{split}::{absolute_item_idx}",
                 "text": doc_text,
                 "question_hint": question_text,
             }
@@ -668,11 +687,12 @@ def load_nq_queries(start: int = 0, limit: int = 5, split: str = "validation") -
 
     dataset = load_dataset("natural_questions", split=f"{split}[{start}:{start + limit}]")
     queries: List[Query] = []
-    for item in dataset:
+    for local_idx, item in enumerate(dataset):
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
         answers = _extract_nq_short_answer_texts(item)
         answer_text = answers[0] if answers else None
-        queries.append(Query(text=question_text, answer=answer_text, answers=answers))
+        query_uid = f"nq::{split}::{start + local_idx}"
+        queries.append(Query(text=question_text, answer=answer_text, answers=answers, query_id=query_uid))
     return queries
 
 

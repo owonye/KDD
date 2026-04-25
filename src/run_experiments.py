@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from experiment_utils import write_run_config
+from experiment_utils import write_manifest, write_run_config
 
 
 def parse_sizes(raw: str) -> list[int]:
@@ -35,33 +35,13 @@ def parse_signal_list(raw: str) -> list[str]:
     return values
 
 
-def resolve_doc_slice(
-    policy: str,
-    fixed_doc_start: int,
-    fixed_doc_limit: int | None,
-    calib_query_start: int,
-    calib_query_limit: int,
-    eval_query_start: int,
-    eval_query_limit: int,
-) -> tuple[int, int]:
-    if policy == "fixed":
-        if fixed_doc_limit is None:
-            raise ValueError("--doc-limit is required when --doc-slice-policy=fixed.")
-        return fixed_doc_start, fixed_doc_limit
-
-    # query_union: include all examples touched by calib/eval query slices.
-    start = min(calib_query_start, eval_query_start)
-    end = max(calib_query_start + calib_query_limit, eval_query_start + eval_query_limit)
-    return start, end - start
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["hotpotqa", "nq"], required=True)
     parser.add_argument("--sizes", default="100,300,1000")
     parser.add_argument("--doc-start", type=int, default=0)
-    parser.add_argument("--doc-limit", type=int, default=None)
-    parser.add_argument("--doc-slice-policy", choices=["query_union", "fixed"], default="query_union")
+    parser.add_argument("--doc-limit", type=int, default=20000)
+    parser.add_argument("--doc-slice-policy", choices=["fixed"], default="fixed")
     parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--corpus-split", default="train")
     parser.add_argument("--query-split", default="validation")
@@ -79,6 +59,9 @@ def main() -> None:
     parser.add_argument("--run-ablation", action="store_true")
     parser.add_argument("--ablation-signals", default="relevance,redundancy,coverage,supportiveness")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--paper-defaults", action="store_true")
+    parser.add_argument("--manifest-out", default="")
+    parser.add_argument("--confidence-calibration-out", default="")
     parser.add_argument("--output-dir", default="results")
     parser.add_argument("--use-openai", action="store_true")
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
@@ -90,6 +73,17 @@ def main() -> None:
         raise ValueError("Paper-grade experiments require --use-openai (or --allow-simple-generator explicitly).")
     if args.label_strategy == "hybrid_generation" and not args.use_openai:
         raise ValueError("hybrid_generation label strategy requires --use-openai.")
+    if args.doc_limit <= 0:
+        raise ValueError("--doc-limit must be positive.")
+
+    if args.paper_defaults:
+        args.doc_limit = 20000
+        args.doc_slice_policy = "fixed"
+        args.corpus_split = "train"
+        args.query_split = "validation"
+        args.initial_k = 3
+        args.expanded_k = 5
+        args.label_strategy = "evidence"
 
     sizes = parse_sizes(args.sizes)
     ablation_signals = parse_signal_list(args.ablation_signals)
@@ -112,24 +106,36 @@ def main() -> None:
             if overlap:
                 raise ValueError("Calibration/evaluation query slices overlap. Use --allow-overlap-splits to bypass.")
 
-        if args.corpus_split != args.query_split and args.doc_slice_policy == "query_union":
-            if args.doc_limit is None:
-                raise ValueError(
-                    "When corpus_split != query_split with query_union policy, set --doc-limit explicitly "
-                    "to ensure sufficient corpus coverage."
-                )
-            current_doc_start = args.doc_start
-            current_doc_limit = args.doc_limit
-        else:
-            current_doc_start, current_doc_limit = resolve_doc_slice(
-                policy=args.doc_slice_policy,
-                fixed_doc_start=args.doc_start,
-                fixed_doc_limit=args.doc_limit,
-                calib_query_start=calib_query_start,
-                calib_query_limit=calib_query_limit,
-                eval_query_start=eval_query_start,
-                eval_query_limit=eval_query_limit,
-            )
+        current_doc_start = args.doc_start
+        current_doc_limit = args.doc_limit
+
+        manifest_path = Path(args.manifest_out) if args.manifest_out else output_dir / f"manifest_{args.mode}_{size}.json"
+        manifest = write_manifest(
+            manifest_path,
+            {
+                "dataset": args.mode,
+                "corpus_split": args.corpus_split,
+                "query_split": args.query_split,
+                "doc_start": current_doc_start,
+                "doc_limit": current_doc_limit,
+                "calib_query_start": calib_query_start,
+                "calib_query_limit": calib_query_limit,
+                "eval_query_start": eval_query_start,
+                "eval_query_limit": eval_query_limit,
+                "initial_k": args.initial_k,
+                "expanded_k": args.expanded_k,
+                "label_strategy": args.label_strategy,
+                "embedding_model": args.embedding_model,
+                "seed": args.seed,
+                "prompt_version": "v1_evidence_only",
+            },
+        )
+
+        confidence_calib_path = (
+            Path(args.confidence_calibration_out)
+            if args.confidence_calibration_out
+            else output_dir / f"confidence_calib_{args.mode}_{size}.json"
+        )
 
         calibrate_cmd = [
             sys.executable,
@@ -160,6 +166,10 @@ def main() -> None:
             args.label_strategy,
             "--seed",
             str(args.seed),
+            "--manifest-path",
+            str(manifest_path),
+            "--confidence-calibration-out",
+            str(confidence_calib_path),
             "--output",
             str(calib_path),
         ]
@@ -202,8 +212,12 @@ def main() -> None:
             str(args.confidence_threshold),
             "--seed",
             str(args.seed),
+            "--manifest-path",
+            str(manifest_path),
             "--calibration-file",
             str(calib_path),
+            "--confidence-calibration-file",
+            str(confidence_calib_path),
             "--output",
             str(eval_path),
         ]
@@ -258,6 +272,8 @@ def main() -> None:
                     signal,
                     "--seed",
                     str(args.seed),
+                    "--manifest-path",
+                    str(manifest_path),
                     "--output",
                     str(ablation_calib_path),
                 ]
@@ -298,6 +314,8 @@ def main() -> None:
                     str(args.expanded_k),
                     "--seed",
                     str(args.seed),
+                    "--manifest-path",
+                    str(manifest_path),
                     "--calibration-file",
                     str(ablation_calib_path),
                     "--baselines",
@@ -360,12 +378,21 @@ def main() -> None:
                 "outputs": {
                     "calibration": str(calib_path),
                     "evaluation": str(eval_path),
+                    "confidence_calibration": str(confidence_calib_path),
                     "ablation": ablation_outputs,
                 },
                 "generator_type": "openai" if args.use_openai else "simple_placeholder",
                 "model_version": args.openai_model if args.use_openai else "simple_placeholder",
                 "label_strategy": args.label_strategy,
                 "ablate_signal": ablation_signals if args.run_ablation else [],
+                "initial_k": args.initial_k,
+                "expanded_k": args.expanded_k,
+                "doc_limit": args.doc_limit,
+                "corpus_split": args.corpus_split,
+                "query_split": args.query_split,
+                "manifest_path": str(manifest_path),
+                "manifest_id": manifest["manifest_id"],
+                "prompt_version": manifest["prompt_version"],
             },
         )
 

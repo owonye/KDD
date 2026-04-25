@@ -7,7 +7,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from experiment_utils import set_global_seed, write_run_config
+from experiment_utils import load_manifest, set_global_seed, write_run_config
 from rag.pipeline import (
     FaissRetriever,
     OpenAIGenerator,
@@ -77,6 +77,25 @@ def build_resources(args: argparse.Namespace):
     return corpus, queries, simple_retriever, faiss_retriever, generator
 
 
+def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
+    manifest = load_manifest(args.manifest_path)
+    if not manifest:
+        args.manifest_id = None
+        return args
+    args.manifest_id = manifest.get("manifest_id")
+    args.doc_start = int(manifest["doc_start"])
+    args.doc_limit = int(manifest["doc_limit"])
+    args.corpus_split = str(manifest["corpus_split"])
+    args.query_start = int(manifest["eval_query_start"])
+    args.query_limit = int(manifest["eval_query_limit"])
+    args.query_split = str(manifest["query_split"])
+    args.initial_k = int(manifest["initial_k"])
+    args.expanded_k = int(manifest["expanded_k"])
+    args.embedding_model = str(manifest["embedding_model"])
+    args.seed = int(manifest["seed"])
+    return args
+
+
 def normalize_answer(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -125,10 +144,10 @@ def add_metrics(row: dict[str, Any], query: Query, generator_type: str) -> dict[
     return row
 
 
-def load_estimator(args: argparse.Namespace) -> tuple[SufficiencyEstimator, str]:
+def load_estimator(args: argparse.Namespace) -> tuple[SufficiencyEstimator, str, dict[str, Any]]:
     estimator = SufficiencyEstimator()
     if not args.calibration_file:
-        return estimator, args.structure_aware_label or "structure_aware_adaptive_rag"
+        return estimator, args.structure_aware_label or "structure_aware_adaptive_rag", {}
 
     calibration_path = Path(args.calibration_file).resolve()
     if not calibration_path.exists():
@@ -143,12 +162,26 @@ def load_estimator(args: argparse.Namespace) -> tuple[SufficiencyEstimator, str]
         threshold=config["threshold"],
     )
     if args.structure_aware_label:
-        return estimator, args.structure_aware_label
+        return estimator, args.structure_aware_label, config
 
     ablate_signal = config.get("ablate_signal", "none")
     if ablate_signal != "none":
-        return estimator, f"structure_aware_wo_{ablate_signal}"
-    return estimator, "structure_aware_adaptive_rag"
+        return estimator, f"structure_aware_wo_{ablate_signal}", config
+    return estimator, "structure_aware_adaptive_rag", config
+
+
+def load_confidence_threshold(args: argparse.Namespace) -> float:
+    if not args.confidence_calibration_file:
+        return args.confidence_threshold
+
+    confidence_path = Path(args.confidence_calibration_file).resolve()
+    if not confidence_path.exists():
+        raise FileNotFoundError(f"Confidence calibration file not found: {confidence_path}")
+    config = json.loads(confidence_path.read_text(encoding="utf-8"))
+    threshold = config.get("threshold")
+    if threshold is None:
+        raise ValueError("Confidence calibration file missing 'threshold'.")
+    return float(threshold)
 
 
 def run_vanilla(query: Query, retriever, generator, top_k: int = 3) -> dict[str, Any]:
@@ -160,8 +193,13 @@ def run_vanilla(query: Query, retriever, generator, top_k: int = 3) -> dict[str,
         "decision": "fixed_retrieve",
         "reason": "fixed_policy",
         "used_docs": [doc.doc_id for doc in docs],
+        "initial_doc_ids": [doc.doc_id for doc in docs],
+        "final_doc_ids": [doc.doc_id for doc in docs],
+        "expanded": False,
         "retrieval_calls": 1,
+        "initial_doc_count": len(docs),
         "doc_count": len(docs),
+        "final_k": len(docs),
         "sufficiency_score": None,
         "relevance": None,
         "redundancy": None,
@@ -171,17 +209,23 @@ def run_vanilla(query: Query, retriever, generator, top_k: int = 3) -> dict[str,
     }
 
 
-def run_fixed_large_k(query: Query, retriever, generator, top_k: int = 5) -> dict[str, Any]:
-    docs = retriever.retrieve(query, top_k=top_k)
-    answer = generator.generate(query, docs)
+def run_fixed_large_k(query: Query, retriever, generator, initial_k: int = 3, expanded_k: int = 5) -> dict[str, Any]:
+    initial_docs = retriever.retrieve(query, top_k=initial_k)
+    final_docs = retriever.retrieve(query, top_k=expanded_k)
+    answer = generator.generate(query, final_docs)
     return {
         "baseline": "fixed_large_k_rag",
         "query": query.text,
         "decision": "fixed_retrieve_more",
         "reason": "fixed_policy",
-        "used_docs": [doc.doc_id for doc in docs],
-        "retrieval_calls": 1,
-        "doc_count": len(docs),
+        "used_docs": [doc.doc_id for doc in final_docs],
+        "initial_doc_ids": [doc.doc_id for doc in initial_docs],
+        "final_doc_ids": [doc.doc_id for doc in final_docs],
+        "expanded": True,
+        "retrieval_calls": 2,
+        "initial_doc_count": len(initial_docs),
+        "doc_count": len(final_docs),
+        "final_k": len(final_docs),
         "sufficiency_score": None,
         "relevance": None,
         "redundancy": None,
@@ -217,8 +261,13 @@ def run_confidence_baseline(
             "decision": "answer_now",
             "reason": "high_confidence",
             "used_docs": [doc.doc_id for doc in initial_docs],
+            "initial_doc_ids": [doc.doc_id for doc in initial_docs],
+            "final_doc_ids": [doc.doc_id for doc in initial_docs],
+            "expanded": False,
             "retrieval_calls": 1,
+            "initial_doc_count": len(initial_docs),
             "doc_count": len(initial_docs),
+            "final_k": len(initial_docs),
             "sufficiency_score": confidence_score,
             "relevance": avg_score,
             "redundancy": None,
@@ -235,8 +284,13 @@ def run_confidence_baseline(
         "decision": "retrieve_more",
         "reason": "low_confidence",
         "used_docs": [doc.doc_id for doc in expanded_docs],
+        "initial_doc_ids": [doc.doc_id for doc in initial_docs],
+        "final_doc_ids": [doc.doc_id for doc in expanded_docs],
+        "expanded": True,
         "retrieval_calls": 2,
+        "initial_doc_count": len(initial_docs),
         "doc_count": len(expanded_docs),
+        "final_k": len(expanded_docs),
         "sufficiency_score": confidence_score,
         "relevance": avg_score,
         "redundancy": None,
@@ -272,8 +326,13 @@ def run_structure_aware(
         "decision": result["decision"],
         "reason": result["reason"],
         "used_docs": result["used_docs"],
+        "initial_doc_ids": result["initial_doc_ids"],
+        "final_doc_ids": result["final_doc_ids"],
+        "expanded": result["expansion_triggered"],
         "retrieval_calls": retrieval_calls,
+        "initial_doc_count": len(result["initial_doc_ids"]),
         "doc_count": len(result["used_docs"]),
+        "final_k": result["final_doc_count"],
         "sufficiency_score": result["sufficiency_score"],
         "relevance": result["features"].relevance,
         "redundancy": result["features"].redundancy,
@@ -290,20 +349,28 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
             f,
             fieldnames=[
                 "query_id",
+                "query_uid",
                 "generator_type",
                 "model_version",
                 "baseline",
                 "query",
                 "decision",
                 "reason",
+                "expanded",
                 "used_docs",
+                "initial_doc_ids",
+                "final_doc_ids",
                 "retrieval_calls",
+                "initial_doc_count",
                 "doc_count",
+                "final_k",
                 "sufficiency_score",
                 "relevance",
                 "redundancy",
                 "coverage",
                 "supportiveness",
+                "label_strategy",
+                "calibration_source",
                 "gold_answer",
                 "exact_match",
                 "f1",
@@ -314,6 +381,8 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
         for row in rows:
             row = row.copy()
             row["used_docs"] = "|".join(row["used_docs"])
+            row["initial_doc_ids"] = "|".join(row["initial_doc_ids"])
+            row["final_doc_ids"] = "|".join(row["final_doc_ids"])
             writer.writerow(row)
 
 
@@ -328,14 +397,16 @@ def main() -> None:
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-start", type=int, default=0)
-    parser.add_argument("--doc-limit", type=int, default=100)
-    parser.add_argument("--corpus-split", default="validation")
+    parser.add_argument("--doc-limit", type=int, default=20000)
+    parser.add_argument("--corpus-split", default="train")
     parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=100)
     parser.add_argument("--query-split", default="validation")
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
+    parser.add_argument("--manifest-path", default="")
+    parser.add_argument("--confidence-calibration-file", default="")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--calibration-file", default="")
     parser.add_argument(
@@ -345,6 +416,7 @@ def main() -> None:
     parser.add_argument("--structure-aware-label", default="")
     parser.add_argument("--output", default="results/baseline_results.csv")
     args = parser.parse_args()
+    args = resolve_manifest_overrides(args)
     if not args.use_openai and args.mode != "demo" and not args.allow_simple_generator:
         raise ValueError("For paper-grade EM/F1, run evaluate.py with --use-openai.")
     set_global_seed(args.seed)
@@ -352,8 +424,11 @@ def main() -> None:
     _, queries, simple_retriever, _, generator = build_resources(args)
     generator_type = "openai" if args.use_openai else "simple_placeholder"
     model_version = args.openai_model if args.use_openai else "simple_placeholder"
-    estimator, structure_aware_name = load_estimator(args)
+    estimator, structure_aware_name, calibration_config = load_estimator(args)
+    confidence_threshold = load_confidence_threshold(args)
     selected_baselines = set(parse_baselines(args.baselines))
+    calibration_source = Path(args.calibration_file).name if args.calibration_file else "default"
+    label_strategy = calibration_config.get("label_strategy", "default")
 
     rows: list[dict[str, Any]] = []
     for query_id, query in enumerate(queries):
@@ -364,18 +439,30 @@ def main() -> None:
                 generator_type=generator_type,
             )
             row["query_id"] = query_id
+            row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
             row["model_version"] = model_version
+            row["label_strategy"] = label_strategy
+            row["calibration_source"] = calibration_source
             rows.append(row)
         if "fixed_large_k_rag" in selected_baselines:
             row = add_metrics(
-                run_fixed_large_k(query, simple_retriever, generator, top_k=args.expanded_k),
+                run_fixed_large_k(
+                    query,
+                    simple_retriever,
+                    generator,
+                    initial_k=args.initial_k,
+                    expanded_k=args.expanded_k,
+                ),
                 query,
                 generator_type=generator_type,
             )
             row["query_id"] = query_id
+            row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
             row["model_version"] = model_version
+            row["label_strategy"] = label_strategy
+            row["calibration_source"] = calibration_source
             rows.append(row)
         if "confidence_adaptive_rag" in selected_baselines:
             row = add_metrics(
@@ -385,14 +472,19 @@ def main() -> None:
                     generator,
                     initial_k=args.initial_k,
                     expanded_k=args.expanded_k,
-                    threshold=args.confidence_threshold,
+                    threshold=confidence_threshold,
                 ),
                 query,
                 generator_type=generator_type,
             )
             row["query_id"] = query_id
+            row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
             row["model_version"] = model_version
+            row["label_strategy"] = label_strategy
+            row["calibration_source"] = (
+                Path(args.confidence_calibration_file).name if args.confidence_calibration_file else "default"
+            )
             rows.append(row)
         if "structure_aware_adaptive_rag" in selected_baselines:
             row = add_metrics(
@@ -410,8 +502,11 @@ def main() -> None:
                 generator_type=generator_type,
             )
             row["query_id"] = query_id
+            row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
             row["model_version"] = model_version
+            row["label_strategy"] = label_strategy
+            row["calibration_source"] = calibration_source
             rows.append(row)
 
     output_path = Path(args.output)
@@ -426,6 +521,13 @@ def main() -> None:
             "generator_type": generator_type,
             "model_version": model_version,
             "openai_cache_stats": generator.get_cache_stats() if args.use_openai else None,
+            "manifest_path": args.manifest_path or None,
+            "manifest_id": args.manifest_id,
+            "prompt_template_version": "evidence_only_v1",
+            "calibration_source": calibration_source,
+            "confidence_calibration_source": (
+                Path(args.confidence_calibration_file).name if args.confidence_calibration_file else "default"
+            ),
             "output": str(output_path),
         },
     )

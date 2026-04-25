@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from experiment_utils import set_global_seed, write_run_config
+from experiment_utils import load_manifest, set_global_seed, write_run_config
 from rag.pipeline import (
     FaissRetriever,
     OpenAIGenerator,
@@ -20,6 +20,7 @@ from rag.pipeline import (
     extract_evidence_features,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
+    min_max_normalize,
     load_nq_queries,
     load_nq_sample,
 )
@@ -53,6 +54,28 @@ def build_resources(
     queries = load_nq_queries(start=query_start, limit=query_limit, split=query_split)
     retriever = FaissRetriever(corpus, model_name=embedding_model)
     return queries, retriever
+
+
+def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
+    manifest = load_manifest(args.manifest_path)
+    if not manifest:
+        args.manifest_id = None
+        return args
+
+    args.manifest_id = manifest.get("manifest_id")
+    args.doc_start = int(manifest["doc_start"])
+    args.doc_limit = int(manifest["doc_limit"])
+    args.corpus_split = str(manifest["corpus_split"])
+    args.query_start = int(manifest["calib_query_start"])
+    args.query_limit = int(manifest["calib_query_limit"])
+    args.query_split = str(manifest["query_split"])
+    args.initial_k = int(manifest["initial_k"])
+    args.expanded_k = int(manifest["expanded_k"])
+    args.embedding_model = str(manifest["embedding_model"])
+    args.seed = int(manifest["seed"])
+    if args.label_strategy == "evidence":
+        args.label_strategy = str(manifest.get("label_strategy", args.label_strategy))
+    return args
 
 
 def normalize_answer(text: str) -> str:
@@ -170,8 +193,8 @@ def main() -> None:
     parser.add_argument("--mode", choices=["demo", "hotpotqa", "nq"], default="demo")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-start", type=int, default=0)
-    parser.add_argument("--doc-limit", type=int, default=100)
-    parser.add_argument("--corpus-split", default="validation")
+    parser.add_argument("--doc-limit", type=int, default=20000)
+    parser.add_argument("--corpus-split", default="train")
     parser.add_argument("--query-start", type=int, default=0)
     parser.add_argument("--query-limit", type=int, default=100)
     parser.add_argument("--query-split", default="validation")
@@ -183,6 +206,8 @@ def main() -> None:
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--manifest-path", default="")
+    parser.add_argument("--confidence-calibration-out", default="")
     parser.add_argument(
         "--ablate-signal",
         choices=["none", "relevance", "redundancy", "coverage", "supportiveness"],
@@ -190,6 +215,7 @@ def main() -> None:
     )
     parser.add_argument("--output", default="results/calibration.json")
     args = parser.parse_args()
+    args = resolve_manifest_overrides(args)
     set_global_seed(args.seed)
 
     queries, retriever = build_resources(
@@ -268,6 +294,11 @@ def main() -> None:
                 "weak_support_overlap_threshold": args.weak_support_overlap_threshold,
                 "ablate_signal": args.ablate_signal,
                 "label_strategy": args.label_strategy,
+                "initial_k": args.initial_k,
+                "expanded_k": args.expanded_k,
+                "embedding_model": args.embedding_model,
+                "manifest_path": args.manifest_path or None,
+                "manifest_id": args.manifest_id,
                 "corpus_split": args.corpus_split,
                 "query_split": args.query_split,
                 "doc_start": args.doc_start,
@@ -275,11 +306,58 @@ def main() -> None:
                 "query_start": args.query_start,
                 "query_limit": args.query_limit,
                 "seed": args.seed,
+                "query_ids": [query.query_id for query in queries if query.query_id],
+                "generator_prompt_version": "evidence_only_v1",
+            }
+
+    # Confidence baseline calibration from the same silver labels.
+    confidence_best = None
+    confidence_best_acc = -1.0
+    confidence_threshold_grid = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    confidence_examples = []
+    for query in queries:
+        initial_docs = retriever.retrieve(query, args.initial_k)
+        expanded_docs = retriever.retrieve(query, args.expanded_k)
+        initial_correct = evidence_has_weak_support(query, initial_docs, overlap_threshold=args.weak_support_overlap_threshold)
+        expanded_correct = evidence_has_weak_support(query, expanded_docs, overlap_threshold=args.weak_support_overlap_threshold)
+        label = build_silver_label(initial_correct, expanded_correct)
+        if label is None:
+            continue
+        raw_scores = [doc.retrieval_score for doc in initial_docs]
+        norm_scores = min_max_normalize(raw_scores) if raw_scores else []
+        avg_score = sum(norm_scores) / max(len(norm_scores), 1)
+        top1_score = norm_scores[0] if norm_scores else 0.0
+        top2_score = norm_scores[1] if len(norm_scores) > 1 else 0.0
+        score_gap = top1_score - top2_score
+        confidence_score = 0.5 * top1_score + 0.4 * avg_score + 0.1 * score_gap
+        confidence_examples.append((confidence_score, label))
+
+    for threshold in confidence_threshold_grid:
+        correct = 0
+        for score, label in confidence_examples:
+            prediction = 1 if score >= threshold else 0
+            if prediction == label:
+                correct += 1
+        acc = correct / max(len(confidence_examples), 1)
+        if acc > confidence_best_acc:
+            confidence_best_acc = acc
+            confidence_best = {
+                "threshold": threshold,
+                "silver_accuracy": acc,
+                "num_examples": len(confidence_examples),
+                "label_strategy": args.label_strategy,
+                "manifest_path": args.manifest_path or None,
+                "manifest_id": args.manifest_id,
+                "initial_k": args.initial_k,
+                "expanded_k": args.expanded_k,
             }
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(best, indent=2), encoding="utf-8")
+    confidence_output = Path(args.confidence_calibration_out) if args.confidence_calibration_out else output_path.with_name(output_path.stem.replace("calib_", "confidence_calib_") + output_path.suffix)
+    confidence_output.parent.mkdir(parents=True, exist_ok=True)
+    confidence_output.write_text(json.dumps(confidence_best, indent=2), encoding="utf-8")
     write_run_config(
         output_path.with_suffix(".meta.json"),
         {
@@ -291,11 +369,18 @@ def main() -> None:
             "generator_type": "openai" if args.use_openai else "simple_placeholder",
             "model_version": args.openai_model if args.use_openai else "simple_placeholder",
             "openai_cache_stats": generator.get_cache_stats() if generator else None,
+            "manifest_path": args.manifest_path or None,
+            "manifest_id": args.manifest_id,
+            "label_strategy": args.label_strategy,
+            "excluded_no_support": excluded_no_support,
+            "generator_prompt_version": "evidence_only_v1",
+            "confidence_calibration_output": str(confidence_output),
             "output": str(output_path),
         },
     )
     print(f"Saved calibration to {output_path}")
     print(json.dumps(best, indent=2))
+    print(f"Saved confidence calibration to {confidence_output}")
 
 
 if __name__ == "__main__":
