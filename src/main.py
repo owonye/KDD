@@ -53,7 +53,13 @@ def build_pipeline(args: argparse.Namespace) -> tuple[StructureAwareAdaptiveRAG,
         queries = load_hotpotqa_queries(start=args.query_start, limit=args.query_limit, split=args.query_split)
         query = queries[0]
     else:
-        raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit, split=args.corpus_split)
+        raw_docs = load_nq_sample(
+            start=args.doc_start,
+            limit=args.doc_limit,
+            split=args.corpus_split,
+            max_tokens=args.nq_max_tokens,
+            stride=args.nq_stride,
+        )
         corpus = embed_corpus_texts(raw_docs, model_name=args.embedding_model)
         retriever = FaissRetriever(corpus, model_name=args.embedding_model)
         queries = load_nq_queries(start=args.query_start, limit=args.query_limit, split=args.query_split)
@@ -65,13 +71,14 @@ def build_pipeline(args: argparse.Namespace) -> tuple[StructureAwareAdaptiveRAG,
 
     estimator = load_estimator(args)
 
+    aspect_model = "" if args.mode == "demo" else args.embedding_model
     pipeline = StructureAwareAdaptiveRAG(
         retriever=retriever,
         generator=generator,
         estimator=estimator,
         initial_k=args.initial_k,
         expanded_k=args.expanded_k,
-        aspect_model=args.embedding_model,
+        aspect_model=aspect_model,
     )
 
     return pipeline, query
@@ -94,6 +101,8 @@ def main() -> None:
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--calibration-file", default="")
+    parser.add_argument("--nq-max-tokens", type=int, default=220)
+    parser.add_argument("--nq-stride", type=int, default=110)
     args = parser.parse_args()
 
     pipeline, query = build_pipeline(args)

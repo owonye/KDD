@@ -55,3 +55,9 @@ models/
 # Cache
 .cache/
 hf_cache/
+
+# Local GPU transfer helpers
+.ssh_known_hosts_gpu
+gpu_bundle/
+gpu_bundle.zip
+gpu_bundle.tar.gz

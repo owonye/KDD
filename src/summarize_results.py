@@ -26,6 +26,10 @@ def summarize_rows(rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, floa
             "retrieval_calls_sum": 0.0,
             "doc_count_sum": 0.0,
             "expanded_count": 0.0,
+            "decision_correct_sum": 0.0,
+            "decision_labeled_count": 0.0,
+            "premature_stop_count": 0.0,
+            "unnecessary_expand_count": 0.0,
         }
     )
     reason_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -37,8 +41,16 @@ def summarize_rows(rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, floa
         grouped[name]["f1_sum"] += safe_float(row.get("f1", "0"))
         grouped[name]["retrieval_calls_sum"] += safe_float(row.get("retrieval_calls", "0"))
         grouped[name]["doc_count_sum"] += safe_float(row.get("doc_count", "0"))
-        if row.get("decision") == "retrieve_more":
+        if str(row.get("expanded", "")).lower() == "true" or row.get("decision") in {"retrieve_more", "fixed_retrieve_more"}:
             grouped[name]["expanded_count"] += 1
+        decision_correct = row.get("decision_correct", "")
+        if decision_correct not in {"", None}:
+            grouped[name]["decision_correct_sum"] += safe_float(decision_correct)
+            grouped[name]["decision_labeled_count"] += 1
+        if row.get("decision_error_type") == "premature_stop":
+            grouped[name]["premature_stop_count"] += 1
+        if row.get("decision_error_type") == "unnecessary_expand":
+            grouped[name]["unnecessary_expand_count"] += 1
         reason = row.get("reason", "")
         if reason:
             reason_counts[name][reason] += 1
@@ -47,7 +59,7 @@ def summarize_rows(rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, floa
 
 def print_summary(grouped: dict[str, dict[str, float]], reason_counts: dict[str, dict[str, int]]) -> None:
     print("=== Baseline Summary ===")
-    print(f"{'baseline':30} {'n':>4} {'EM':>8} {'F1':>8} {'calls':>8} {'docs':>8} {'expand%':>8}")
+    print(f"{'baseline':30} {'n':>4} {'EM':>8} {'F1':>8} {'calls':>8} {'docs':>8} {'expand%':>8} {'decAcc':>8} {'early%':>8} {'extra%':>8}")
     for name, stats in sorted(grouped.items()):
         count = max(stats["count"], 1.0)
         avg_em = stats["exact_match_sum"] / count
@@ -55,9 +67,14 @@ def print_summary(grouped: dict[str, dict[str, float]], reason_counts: dict[str,
         avg_calls = stats["retrieval_calls_sum"] / count
         avg_docs = stats["doc_count_sum"] / count
         expand_rate = stats["expanded_count"] / count
+        decision_count = max(stats["decision_labeled_count"], 1.0)
+        decision_acc = stats["decision_correct_sum"] / decision_count
+        premature_rate = stats["premature_stop_count"] / count
+        unnecessary_rate = stats["unnecessary_expand_count"] / count
         print(
             f"{name:30} {int(count):4d} "
-            f"{avg_em:8.3f} {avg_f1:8.3f} {avg_calls:8.3f} {avg_docs:8.3f} {expand_rate:8.3f}"
+            f"{avg_em:8.3f} {avg_f1:8.3f} {avg_calls:8.3f} {avg_docs:8.3f} {expand_rate:8.3f} "
+            f"{decision_acc:8.3f} {premature_rate:8.3f} {unnecessary_rate:8.3f}"
         )
 
     print("\n=== Reason Counts ===")
@@ -110,12 +127,29 @@ def write_ablation_summary(rows: list[dict[str, str]], output: Path) -> None:
                 "calls": stats["retrieval_calls_sum"] / count,
                 "docs": stats["doc_count_sum"] / count,
                 "expand_rate": stats["expanded_count"] / count,
+                "decision_accuracy": stats["decision_correct_sum"] / max(stats["decision_labeled_count"], 1.0),
+                "premature_stop_rate": stats["premature_stop_count"] / count,
+                "unnecessary_expand_rate": stats["unnecessary_expand_count"] / count,
             }
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["dataset", "size", "baseline", "n", "em", "f1", "calls", "docs", "expand_rate"]
+            f,
+            fieldnames=[
+                "dataset",
+                "size",
+                "baseline",
+                "n",
+                "em",
+                "f1",
+                "calls",
+                "docs",
+                "expand_rate",
+                "decision_accuracy",
+                "premature_stop_rate",
+                "unnecessary_expand_rate",
+            ],
         )
         writer.writeheader()
         for row in sorted(ablation_rows, key=lambda item: (item["dataset"], int(item["size"]) if str(item["size"]).isdigit() else 0, _baseline_order(item["baseline"]))):

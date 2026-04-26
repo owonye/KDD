@@ -18,6 +18,7 @@ CONTENT_STOPWORDS = {
     "and", "or", "with", "by", "from", "as", "at",
 }
 SUPPORTIVENESS_LAMBDA = 0.5
+GENERATOR_PROMPT_VERSION = "short_answer_v2"
 
 
 @dataclass
@@ -149,7 +150,7 @@ class OpenAIGenerator:
 
     def _cache_key(self, query: Query, evidence: List[RetrievedDocument]) -> str:
         ids = "|".join(doc.doc_id for doc in evidence)
-        return f"{self.model}::{query.text}::{ids}"
+        return f"{GENERATOR_PROMPT_VERSION}::{self.model}::{query.text}::{ids}"
 
     def _request_with_retry(self, prompt: str) -> str:
         for attempt in range(3):
@@ -177,10 +178,12 @@ class OpenAIGenerator:
             f"[{doc.doc_id}] {doc.text}" for doc in evidence
         )
         prompt = (
-            "Answer the question using only the provided evidence.\n\n"
+            "Answer the question using only the provided evidence.\n"
+            "Return only the shortest answer span or phrase. Do not write a sentence unless the answer requires it.\n"
+            "If the evidence does not contain the answer, return exactly: unknown\n\n"
             f"Question: {query.text}\n\n"
             f"Evidence:\n{context}\n\n"
-            "Answer:"
+            "Short answer:"
         )
         key = self._cache_key(query, evidence)
         cached = self._cache.get(key)
@@ -368,6 +371,8 @@ _ASPECT_ENCODER_BY_MODEL: dict[str, object] = {}
 
 
 def get_aspect_encoder(model_name: str):
+    if not model_name:
+        return False
     cached = _ASPECT_ENCODER_BY_MODEL.get(model_name)
     if cached is not None:
         return cached
@@ -399,7 +404,10 @@ def compute_aspect_document_similarity(aspect: str, doc: RetrievedDocument, enco
     if norm == 0.0:
         return compute_aspect_lexical_overlap(aspect, doc)
     aspect_vec = aspect_vec / norm
-    return float(np.dot(aspect_vec, np.array(doc.embedding)))
+    doc_vec = np.array(doc.embedding)
+    if len(aspect_vec) != len(doc_vec):
+        return compute_aspect_lexical_overlap(aspect, doc)
+    return float(np.dot(aspect_vec, doc_vec))
 
 
 def compute_aspect_lexical_overlap(aspect: str, doc: RetrievedDocument) -> float:
@@ -724,7 +732,14 @@ def _extract_nq_document_tokens(item: dict) -> List[str]:
     if isinstance(tokens_field, dict):
         # Common schema: {"token": [...], "is_html": [...]}
         token_values = tokens_field.get("token")
+        html_flags = tokens_field.get("is_html")
         if isinstance(token_values, list):
+            if isinstance(html_flags, list) and len(html_flags) == len(token_values):
+                return [
+                    str(token)
+                    for token, is_html in zip(token_values, html_flags)
+                    if not is_html and str(token).strip()
+                ]
             return [str(token) for token in token_values if str(token).strip()]
     elif isinstance(tokens_field, list):
         values: List[str] = []
@@ -784,7 +799,30 @@ def _extract_nq_short_answer_texts(item: dict) -> List[str]:
     return deduped
 
 
-def load_nq_sample(start: int = 0, limit: int = 50, split: str = "validation") -> List[dict]:
+def _chunk_tokens(tokens: List[str], max_tokens: int, stride: int) -> List[List[str]]:
+    if max_tokens <= 0:
+        return [tokens]
+    if stride <= 0:
+        stride = max_tokens
+
+    chunks: List[List[str]] = []
+    for chunk_start in range(0, len(tokens), stride):
+        chunk = tokens[chunk_start:chunk_start + max_tokens]
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        if chunk_start + max_tokens >= len(tokens):
+            break
+    return chunks
+
+
+def load_nq_sample(
+    start: int = 0,
+    limit: int = 50,
+    split: str = "validation",
+    max_tokens: int = 220,
+    stride: int = 110,
+) -> List[dict]:
     from datasets import load_dataset
 
     dataset = load_dataset("natural_questions", split=f"{split}[{start}:{start + limit}]")
@@ -793,16 +831,23 @@ def load_nq_sample(start: int = 0, limit: int = 50, split: str = "validation") -
     for item_idx, item in enumerate(dataset):
         absolute_item_idx = start + item_idx
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
-        doc_text = item.get("document", {}).get("text", "") if isinstance(item.get("document"), dict) else item.get("document", "")
-        if not doc_text:
+        tokens = _extract_nq_document_tokens(item)
+        if not tokens:
+            doc_text = item.get("document", {}).get("text", "") if isinstance(item.get("document"), dict) else item.get("document", "")
+            tokens = doc_text.split() if isinstance(doc_text, str) else []
+        if not tokens:
             continue
-        raw_docs.append(
-            {
-                "doc_id": f"nq::{split}::{absolute_item_idx}",
-                "text": doc_text,
-                "question_hint": question_text,
-            }
-        )
+        for chunk_idx, chunk_tokens in enumerate(_chunk_tokens(tokens, max_tokens=max_tokens, stride=stride)):
+            doc_text = " ".join(chunk_tokens).strip()
+            if not doc_text:
+                continue
+            raw_docs.append(
+                {
+                    "doc_id": f"nq::{split}::{absolute_item_idx}::chunk_{chunk_idx}",
+                    "text": doc_text,
+                    "question_hint": question_text,
+                }
+            )
     return raw_docs
 
 

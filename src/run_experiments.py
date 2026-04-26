@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from experiment_utils import write_manifest, write_run_config
+from rag.pipeline import GENERATOR_PROMPT_VERSION
 
 DEFAULT_OPENAI_CACHE_PATH = "results/openai_cache.jsonl"
 DEFAULT_RETRIEVAL_CACHE_DIR = "results/cache"
@@ -69,6 +70,8 @@ def main() -> None:
     parser.add_argument("--corpus-split", default="train")
     parser.add_argument("--query-split", default="validation")
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
+    parser.add_argument("--nq-max-tokens", type=int, default=220)
+    parser.add_argument("--nq-stride", type=int, default=110)
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
@@ -105,10 +108,10 @@ def main() -> None:
     if args.paper_defaults:
         args.doc_limit = 20000
         args.doc_slice_policy = "fixed"
-        args.corpus_split = "train"
         args.query_split = "validation"
+        args.corpus_split = args.query_split
         args.initial_k = 3
-        args.expanded_k = 5
+        args.expanded_k = 8
         args.label_strategy = "evidence"
 
     sizes = parse_sizes(args.sizes)
@@ -162,8 +165,10 @@ def main() -> None:
                 "expanded_k": args.expanded_k,
                 "label_strategy": args.label_strategy,
                 "embedding_model": args.embedding_model,
+                "nq_max_tokens": args.nq_max_tokens,
+                "nq_stride": args.nq_stride,
                 "seed": args.seed,
-                "prompt_version": "v1_evidence_only",
+                "prompt_version": GENERATOR_PROMPT_VERSION,
                 "retrieval_cache_dir": args.retrieval_cache_dir,
             },
         )
@@ -195,6 +200,10 @@ def main() -> None:
             args.embedding_model,
             "--retrieval-cache-dir",
             args.retrieval_cache_dir,
+            "--nq-max-tokens",
+            str(args.nq_max_tokens),
+            "--nq-stride",
+            str(args.nq_stride),
             "--initial-k",
             str(args.initial_k),
             "--expanded-k",
@@ -245,12 +254,18 @@ def main() -> None:
             args.embedding_model,
             "--retrieval-cache-dir",
             args.retrieval_cache_dir,
+            "--nq-max-tokens",
+            str(args.nq_max_tokens),
+            "--nq-stride",
+            str(args.nq_stride),
             "--initial-k",
             str(args.initial_k),
             "--expanded-k",
             str(args.expanded_k),
             "--confidence-threshold",
             str(args.confidence_threshold),
+            "--weak-support-overlap-threshold",
+            str(args.weak_support_overlap_threshold),
             "--seed",
             str(args.seed),
             "--manifest-path",
@@ -303,6 +318,10 @@ def main() -> None:
                     args.embedding_model,
                     "--retrieval-cache-dir",
                     args.retrieval_cache_dir,
+                    "--nq-max-tokens",
+                    str(args.nq_max_tokens),
+                    "--nq-stride",
+                    str(args.nq_stride),
                     "--initial-k",
                     str(args.initial_k),
                     "--expanded-k",
@@ -353,10 +372,16 @@ def main() -> None:
                     args.embedding_model,
                     "--retrieval-cache-dir",
                     args.retrieval_cache_dir,
+                    "--nq-max-tokens",
+                    str(args.nq_max_tokens),
+                    "--nq-stride",
+                    str(args.nq_stride),
                     "--initial-k",
                     str(args.initial_k),
                     "--expanded-k",
                     str(args.expanded_k),
+                    "--weak-support-overlap-threshold",
+                    str(args.weak_support_overlap_threshold),
                     "--seed",
                     str(args.seed),
                     "--manifest-path",
@@ -436,6 +461,8 @@ def main() -> None:
                 "corpus_split": args.corpus_split,
                 "query_split": args.query_split,
                 "retrieval_cache_dir": args.retrieval_cache_dir,
+                "nq_max_tokens": args.nq_max_tokens,
+                "nq_stride": args.nq_stride,
                 "manifest_path": str(manifest_path),
                 "manifest_id": manifest["manifest_id"],
                 "prompt_version": manifest["prompt_version"],

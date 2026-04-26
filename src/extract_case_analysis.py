@@ -59,7 +59,18 @@ def main() -> None:
         structure_em = safe_float(structure.get("exact_match"))
         confidence_em = safe_float(confidence.get("exact_match"))
         em_delta = structure_em - confidence_em
-        if not decision_disagree and reason not in {"low_coverage", "high_redundancy", "weak_supportiveness"} and em_delta == 0:
+        structure_f1 = safe_float(structure.get("f1"))
+        confidence_f1 = safe_float(confidence.get("f1"))
+        f1_delta = structure_f1 - confidence_f1
+        structure_error = structure.get("decision_error_type", "")
+        confidence_error = confidence.get("decision_error_type", "")
+        if (
+            not decision_disagree
+            and reason not in {"low_coverage", "high_redundancy", "weak_supportiveness"}
+            and em_delta == 0
+            and f1_delta == 0
+            and structure_error == confidence_error
+        ):
             continue
 
         error_type = "neutral"
@@ -85,16 +96,37 @@ def main() -> None:
                 "confidence_score": confidence_score,
                 "score_gap": score_gap,
                 "decision_disagree": int(decision_disagree),
+                "oracle_initial_support": structure.get("oracle_initial_support", ""),
+                "oracle_expanded_support": structure.get("oracle_expanded_support", ""),
+                "oracle_should_expand": structure.get("oracle_should_expand", ""),
+                "structure_decision_correct": structure.get("decision_correct", ""),
+                "confidence_decision_correct": confidence.get("decision_correct", ""),
+                "structure_decision_error_type": structure_error,
+                "confidence_decision_error_type": confidence_error,
                 "structure_em": structure_em,
                 "confidence_em": confidence_em,
                 "em_delta": em_delta,
+                "structure_f1": structure_f1,
+                "confidence_f1": confidence_f1,
+                "f1_delta": f1_delta,
+                "structure_initial_doc_ids": structure.get("initial_doc_ids", ""),
+                "structure_final_doc_ids": structure.get("final_doc_ids", ""),
+                "confidence_final_doc_ids": confidence.get("final_doc_ids", ""),
+                "structure_answer": structure.get("answer", ""),
+                "confidence_answer": confidence.get("answer", ""),
                 "error_type": error_type,
             }
         )
 
     ranked_all = sorted(
         candidates,
-        key=lambda row: (row["decision_disagree"], abs(float(row["em_delta"])), row["score_gap"]),
+        key=lambda row: (
+            row["confidence_decision_error_type"] == "premature_stop",
+            row["structure_decision_error_type"] == "correct",
+            row["decision_disagree"],
+            abs(float(row["em_delta"])) + abs(float(row["f1_delta"])),
+            row["score_gap"],
+        ),
         reverse=True,
     )
     if args.balance_by_reason:
@@ -129,9 +161,24 @@ def main() -> None:
                 "confidence_score",
                 "score_gap",
                 "decision_disagree",
+                "oracle_initial_support",
+                "oracle_expanded_support",
+                "oracle_should_expand",
+                "structure_decision_correct",
+                "confidence_decision_correct",
+                "structure_decision_error_type",
+                "confidence_decision_error_type",
                 "structure_em",
                 "confidence_em",
                 "em_delta",
+                "structure_f1",
+                "confidence_f1",
+                "f1_delta",
+                "structure_initial_doc_ids",
+                "structure_final_doc_ids",
+                "confidence_final_doc_ids",
+                "structure_answer",
+                "confidence_answer",
                 "error_type",
             ],
         )

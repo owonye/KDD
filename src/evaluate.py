@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from experiment_utils import load_manifest, set_global_seed, write_run_config
 from rag.pipeline import (
     FaissRetriever,
+    GENERATOR_PROMPT_VERSION,
     OpenAIGenerator,
     Query,
     SimpleGenerator,
@@ -18,6 +19,7 @@ from rag.pipeline import (
     StructureAwareAdaptiveRAG,
     SufficiencyEstimator,
     build_demo_corpus,
+    compute_query_overlap,
     embed_corpus_texts,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
@@ -69,8 +71,17 @@ def build_resources(args: argparse.Namespace):
         )
         faiss_retriever = simple_retriever
     else:
-        raw_docs = load_nq_sample(start=args.doc_start, limit=args.doc_limit, split=args.corpus_split)
-        cache_namespace = f"nq::{args.corpus_split}::{args.doc_start}:{args.doc_start + args.doc_limit}"
+        raw_docs = load_nq_sample(
+            start=args.doc_start,
+            limit=args.doc_limit,
+            split=args.corpus_split,
+            max_tokens=args.nq_max_tokens,
+            stride=args.nq_stride,
+        )
+        cache_namespace = (
+            f"nq::{args.corpus_split}::{args.doc_start}:{args.doc_start + args.doc_limit}"
+            f"::chunk_{args.nq_max_tokens}_{args.nq_stride}"
+        )
         corpus = embed_corpus_texts(
             raw_docs,
             model_name=args.embedding_model,
@@ -117,6 +128,8 @@ def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
     args.embedding_model = str(manifest["embedding_model"])
     args.seed = int(manifest["seed"])
     args.retrieval_cache_dir = str(manifest.get("retrieval_cache_dir", args.retrieval_cache_dir))
+    args.nq_max_tokens = int(manifest.get("nq_max_tokens", args.nq_max_tokens))
+    args.nq_stride = int(manifest.get("nq_stride", args.nq_stride))
     return args
 
 
@@ -150,6 +163,73 @@ def f1_score(prediction: str, gold: str) -> float:
     precision = num_same / len(pred_tokens)
     recall = num_same / len(gold_tokens)
     return 2 * precision * recall / (precision + recall)
+
+
+def evidence_has_weak_support(query: Query, docs, overlap_threshold: float) -> bool:
+    gold_answers = query.answers if query.answers else ([query.answer] if query.answer else [])
+    if not gold_answers:
+        return False
+    normalized_gold = [normalize_answer(answer) for answer in gold_answers if answer]
+    normalized_gold = [answer for answer in normalized_gold if answer]
+    if not normalized_gold:
+        return False
+    for doc in docs:
+        doc_text = normalize_answer(doc.text)
+        has_match = any(gold in doc_text for gold in normalized_gold)
+        if has_match and compute_query_overlap(query, doc) >= overlap_threshold:
+            return True
+    return False
+
+
+def get_oracle_support(
+    query: Query,
+    retriever,
+    initial_k: int,
+    expanded_k: int,
+    overlap_threshold: float,
+) -> dict[str, Any]:
+    initial_docs = retriever.retrieve(query, top_k=initial_k)
+    expanded_docs = retriever.retrieve(query, top_k=expanded_k)
+    initial_support = evidence_has_weak_support(query, initial_docs, overlap_threshold=overlap_threshold)
+    expanded_support = evidence_has_weak_support(query, expanded_docs, overlap_threshold=overlap_threshold)
+    oracle_should_expand = (not initial_support) and expanded_support
+    oracle_has_signal = initial_support or expanded_support
+    return {
+        "oracle_initial_support": initial_support,
+        "oracle_expanded_support": expanded_support,
+        "oracle_should_expand": oracle_should_expand,
+        "oracle_has_signal": oracle_has_signal,
+    }
+
+
+def add_oracle_metrics(row: dict[str, Any], oracle: dict[str, Any]) -> dict[str, Any]:
+    row = row.copy()
+    row.update(oracle)
+    if not oracle["oracle_has_signal"]:
+        row["decision_correct"] = None
+        row["decision_error_type"] = "no_oracle_support"
+        return row
+
+    if row["decision"] in {"answer_now", "fixed_retrieve"}:
+        decision_expand = False
+    elif row["decision"] in {"retrieve_more", "fixed_retrieve_more"}:
+        decision_expand = True
+    else:
+        decision_expand = None
+
+    if decision_expand is None:
+        row["decision_correct"] = None
+        row["decision_error_type"] = "fixed_policy"
+    elif decision_expand == oracle["oracle_should_expand"]:
+        row["decision_correct"] = 1
+        row["decision_error_type"] = "correct"
+    elif decision_expand:
+        row["decision_correct"] = 0
+        row["decision_error_type"] = "unnecessary_expand"
+    else:
+        row["decision_correct"] = 0
+        row["decision_error_type"] = "premature_stop"
+    return row
 
 
 def add_metrics(row: dict[str, Any], query: Query, generator_type: str) -> dict[str, Any]:
@@ -234,8 +314,8 @@ def run_vanilla(query: Query, retriever, generator, top_k: int = 3) -> dict[str,
 
 
 def run_fixed_large_k(query: Query, retriever, generator, initial_k: int = 3, expanded_k: int = 5) -> dict[str, Any]:
-    initial_docs = retriever.retrieve(query, top_k=initial_k)
     final_docs = retriever.retrieve(query, top_k=expanded_k)
+    initial_docs = final_docs[:initial_k]
     answer = generator.generate(query, final_docs)
     return {
         "baseline": "fixed_large_k_rag",
@@ -246,7 +326,7 @@ def run_fixed_large_k(query: Query, retriever, generator, initial_k: int = 3, ex
         "initial_doc_ids": [doc.doc_id for doc in initial_docs],
         "final_doc_ids": [doc.doc_id for doc in final_docs],
         "expanded": True,
-        "retrieval_calls": 2,
+        "retrieval_calls": 1,
         "initial_doc_count": len(initial_docs),
         "doc_count": len(final_docs),
         "final_k": len(final_docs),
@@ -393,6 +473,12 @@ def write_results(rows: list[dict[str, Any]], output_path: Path) -> None:
                 "redundancy",
                 "coverage",
                 "supportiveness",
+                "oracle_initial_support",
+                "oracle_expanded_support",
+                "oracle_should_expand",
+                "oracle_has_signal",
+                "decision_correct",
+                "decision_error_type",
                 "label_strategy",
                 "calibration_source",
                 "gold_answer",
@@ -420,6 +506,8 @@ def main() -> None:
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--retrieval-cache-dir", default="results/cache")
+    parser.add_argument("--nq-max-tokens", type=int, default=220)
+    parser.add_argument("--nq-stride", type=int, default=110)
     parser.add_argument("--embedding-model", default="BAAI/bge-small-en-v1.5")
     parser.add_argument("--doc-start", type=int, default=0)
     parser.add_argument("--doc-limit", type=int, default=20000)
@@ -429,6 +517,7 @@ def main() -> None:
     parser.add_argument("--query-split", default="validation")
     parser.add_argument("--initial-k", type=int, default=3)
     parser.add_argument("--expanded-k", type=int, default=5)
+    parser.add_argument("--weak-support-overlap-threshold", type=float, default=0.2)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--confidence-calibration-file", default="")
@@ -480,17 +569,26 @@ def main() -> None:
     selected_baselines = set(parse_baselines(args.baselines))
     calibration_source = Path(args.calibration_file).name if args.calibration_file else "default"
     label_strategy = calibration_config.get("label_strategy", "default")
+    feature_aspect_model = "" if args.mode == "demo" else args.embedding_model
 
     rows: list[dict[str, Any]] = []
     total_queries = len(queries)
     stage_started = time.time()
     for query_id, query in enumerate(queries):
+        oracle = get_oracle_support(
+            query,
+            simple_retriever,
+            initial_k=args.initial_k,
+            expanded_k=args.expanded_k,
+            overlap_threshold=args.weak_support_overlap_threshold,
+        )
         if "vanilla_rag" in selected_baselines:
             row = add_metrics(
                 run_vanilla(query, simple_retriever, generator, top_k=args.initial_k),
                 query,
                 generator_type=generator_type,
             )
+            row = add_oracle_metrics(row, oracle)
             row["query_id"] = query_id
             row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
@@ -510,6 +608,7 @@ def main() -> None:
                 query,
                 generator_type=generator_type,
             )
+            row = add_oracle_metrics(row, oracle)
             row["query_id"] = query_id
             row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
@@ -530,6 +629,7 @@ def main() -> None:
                 query,
                 generator_type=generator_type,
             )
+            row = add_oracle_metrics(row, oracle)
             row["query_id"] = query_id
             row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
@@ -548,12 +648,13 @@ def main() -> None:
                     estimator,
                     initial_k=args.initial_k,
                     expanded_k=args.expanded_k,
-                    aspect_model=args.embedding_model,
+                    aspect_model=feature_aspect_model,
                     baseline_name=structure_aware_name,
                 ),
                 query,
                 generator_type=generator_type,
             )
+            row = add_oracle_metrics(row, oracle)
             row["query_id"] = query_id
             row["query_uid"] = query.query_id or f"{args.mode}::{args.query_split}::{args.query_start + query_id}"
             row["generator_type"] = generator_type
@@ -578,7 +679,7 @@ def main() -> None:
             "retrieval_cache_dir": args.retrieval_cache_dir,
             "manifest_path": args.manifest_path or None,
             "manifest_id": args.manifest_id,
-            "prompt_template_version": "evidence_only_v1",
+            "prompt_template_version": GENERATOR_PROMPT_VERSION,
             "calibration_source": calibration_source,
             "confidence_calibration_source": (
                 Path(args.confidence_calibration_file).name if args.confidence_calibration_file else "default"

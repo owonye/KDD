@@ -19,6 +19,7 @@ from rag.pipeline import (
     compute_query_overlap,
     embed_corpus_texts,
     extract_evidence_features,
+    GENERATOR_PROMPT_VERSION,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
     min_max_normalize,
@@ -37,6 +38,8 @@ def build_resources(
     query_split: str,
     embedding_model: str,
     retrieval_cache_dir: str,
+    nq_max_tokens: int,
+    nq_stride: int,
 ):
     if mode == "demo":
         corpus = build_demo_corpus()
@@ -62,8 +65,14 @@ def build_resources(
         )
         return queries, retriever
 
-    raw_docs = load_nq_sample(start=doc_start, limit=doc_limit, split=corpus_split)
-    cache_namespace = f"nq::{corpus_split}::{doc_start}:{doc_start + doc_limit}"
+    raw_docs = load_nq_sample(
+        start=doc_start,
+        limit=doc_limit,
+        split=corpus_split,
+        max_tokens=nq_max_tokens,
+        stride=nq_stride,
+    )
+    cache_namespace = f"nq::{corpus_split}::{doc_start}:{doc_start + doc_limit}::chunk_{nq_max_tokens}_{nq_stride}"
     corpus = embed_corpus_texts(
         raw_docs,
         model_name=embedding_model,
@@ -98,6 +107,8 @@ def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
     args.embedding_model = str(manifest["embedding_model"])
     args.seed = int(manifest["seed"])
     args.retrieval_cache_dir = str(manifest.get("retrieval_cache_dir", args.retrieval_cache_dir))
+    args.nq_max_tokens = int(manifest.get("nq_max_tokens", args.nq_max_tokens))
+    args.nq_stride = int(manifest.get("nq_stride", args.nq_stride))
     if args.label_strategy == "evidence":
         args.label_strategy = str(manifest.get("label_strategy", args.label_strategy))
     return args
@@ -156,7 +167,7 @@ def is_monotonic_configuration(
 
 
 def get_weight_grid(ablate_signal: str) -> tuple[list[float], list[float], list[float], list[float]]:
-    default_grid = [0.1, 0.2, 0.35, 0.5]
+    default_grid = [0.0, 0.1, 0.2, 0.35, 0.5, 0.75]
     wr_grid = [0.0] if ablate_signal == "relevance" else default_grid
     wc_grid = [0.0] if ablate_signal == "coverage" else default_grid
     ws_grid = [0.0] if ablate_signal == "supportiveness" else default_grid
@@ -231,6 +242,8 @@ def main() -> None:
     parser.add_argument("--openai-model", default="gpt-4.1-mini")
     parser.add_argument("--openai-cache-path", default="results/openai_cache.jsonl")
     parser.add_argument("--retrieval-cache-dir", default="results/cache")
+    parser.add_argument("--nq-max-tokens", type=int, default=220)
+    parser.add_argument("--nq-stride", type=int, default=110)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--confidence-calibration-out", default="")
@@ -280,6 +293,8 @@ def main() -> None:
         args.query_split,
         args.embedding_model,
         args.retrieval_cache_dir,
+        args.nq_max_tokens,
+        args.nq_stride,
     )
     if args.label_strategy == "hybrid_generation" and not args.use_openai:
         raise ValueError("hybrid_generation label strategy requires --use-openai.")
@@ -287,6 +302,7 @@ def main() -> None:
     examples = []
     excluded_no_support = 0
     generator = OpenAIGenerator(model=args.openai_model, cache_path=args.openai_cache_path) if args.use_openai else None
+    feature_aspect_model = "" if args.mode == "demo" else args.embedding_model
     total_queries = len(queries)
     stage_started = time.time()
     for idx, query in enumerate(queries, start=1):
@@ -298,7 +314,7 @@ def main() -> None:
                 initial_k=args.initial_k,
                 expanded_k=args.expanded_k,
                 overlap_threshold=args.weak_support_overlap_threshold,
-                embedding_model=args.embedding_model,
+                embedding_model=feature_aspect_model,
             )
         else:
             initial_features, silver_label = label_from_evidence(
@@ -307,7 +323,7 @@ def main() -> None:
                 initial_k=args.initial_k,
                 expanded_k=args.expanded_k,
                 overlap_threshold=args.weak_support_overlap_threshold,
-                embedding_model=args.embedding_model,
+                embedding_model=feature_aspect_model,
             )
         if silver_label is None:
             excluded_no_support += 1
@@ -317,8 +333,9 @@ def main() -> None:
 
     best = None
     best_acc = -1.0
+    best_balanced_acc = -1.0
     wr_grid, wc_grid, ws_grid, wu_grid = get_weight_grid(args.ablate_signal)
-    threshold_grid = [0.3, 0.4, 0.5, 0.6, 0.7]
+    threshold_grid = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8]
 
     for wr, wc, ws, wu, threshold in product(wr_grid, wc_grid, ws_grid, wu_grid, threshold_grid):
         if not is_monotonic_configuration(wr, wc, ws, wu):
@@ -331,13 +348,38 @@ def main() -> None:
             threshold=threshold,
         )
         correct = 0
+        predicted_expansions = 0
+        sufficient_total = 0
+        insufficient_total = 0
+        sufficient_correct = 0
+        insufficient_correct = 0
         for features, label in examples:
             prediction = 1 if estimator.predict(features).sufficient else 0
             if prediction == label:
                 correct += 1
+            if label == 1:
+                sufficient_total += 1
+                if prediction == label:
+                    sufficient_correct += 1
+            else:
+                insufficient_total += 1
+                if prediction == label:
+                    insufficient_correct += 1
+            if prediction == 0:
+                predicted_expansions += 1
         acc = correct / max(len(examples), 1)
-        if acc > best_acc:
+        sufficient_recall = sufficient_correct / max(sufficient_total, 1)
+        insufficient_recall = insufficient_correct / max(insufficient_total, 1)
+        balanced_acc = 0.5 * (sufficient_recall + insufficient_recall)
+        expansion_rate = predicted_expansions / max(len(examples), 1)
+        best_expansion_rate = best.get("predicted_expansion_rate", float("inf")) if best else float("inf")
+        if (
+            balanced_acc > best_balanced_acc
+            or (balanced_acc == best_balanced_acc and acc > best_acc)
+            or (balanced_acc == best_balanced_acc and acc == best_acc and expansion_rate < best_expansion_rate)
+        ):
             best_acc = acc
+            best_balanced_acc = balanced_acc
             best = {
                 "relevance_weight": wr,
                 "coverage_weight": wc,
@@ -345,6 +387,12 @@ def main() -> None:
                 "redundancy_weight": wu,
                 "threshold": threshold,
                 "silver_accuracy": acc,
+                "silver_balanced_accuracy": balanced_acc,
+                "silver_sufficient_recall": sufficient_recall,
+                "silver_insufficient_recall": insufficient_recall,
+                "silver_sufficient_total": sufficient_total,
+                "silver_insufficient_total": insufficient_total,
+                "predicted_expansion_rate": expansion_rate,
                 "num_examples": len(examples),
                 "excluded_no_support": excluded_no_support,
                 "weak_support_overlap_threshold": args.weak_support_overlap_threshold,
@@ -363,14 +411,17 @@ def main() -> None:
                 "query_limit": args.query_limit,
                 "seed": args.seed,
                 "query_ids": [query.query_id for query in queries if query.query_id],
-                "generator_prompt_version": "evidence_only_v1",
+                "generator_prompt_version": GENERATOR_PROMPT_VERSION,
                 "retrieval_cache_dir": args.retrieval_cache_dir,
+                "nq_max_tokens": args.nq_max_tokens,
+                "nq_stride": args.nq_stride,
             }
 
     # Confidence baseline calibration from the same silver labels.
     confidence_best = None
     confidence_best_acc = -1.0
-    confidence_threshold_grid = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    confidence_best_balanced_acc = -1.0
+    confidence_threshold_grid = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     confidence_examples = []
     stage_started = time.time()
     for idx, query in enumerate(queries, start=1):
@@ -393,16 +444,39 @@ def main() -> None:
 
     for threshold in confidence_threshold_grid:
         correct = 0
+        sufficient_total = 0
+        insufficient_total = 0
+        sufficient_correct = 0
+        insufficient_correct = 0
         for score, label in confidence_examples:
             prediction = 1 if score >= threshold else 0
             if prediction == label:
                 correct += 1
+            if label == 1:
+                sufficient_total += 1
+                if prediction == label:
+                    sufficient_correct += 1
+            else:
+                insufficient_total += 1
+                if prediction == label:
+                    insufficient_correct += 1
         acc = correct / max(len(confidence_examples), 1)
-        if acc > confidence_best_acc:
+        sufficient_recall = sufficient_correct / max(sufficient_total, 1)
+        insufficient_recall = insufficient_correct / max(insufficient_total, 1)
+        balanced_acc = 0.5 * (sufficient_recall + insufficient_recall)
+        if balanced_acc > confidence_best_balanced_acc or (
+            balanced_acc == confidence_best_balanced_acc and acc > confidence_best_acc
+        ):
             confidence_best_acc = acc
+            confidence_best_balanced_acc = balanced_acc
             confidence_best = {
                 "threshold": threshold,
                 "silver_accuracy": acc,
+                "silver_balanced_accuracy": balanced_acc,
+                "silver_sufficient_recall": sufficient_recall,
+                "silver_insufficient_recall": insufficient_recall,
+                "silver_sufficient_total": sufficient_total,
+                "silver_insufficient_total": insufficient_total,
                 "num_examples": len(confidence_examples),
                 "label_strategy": args.label_strategy,
                 "manifest_path": args.manifest_path or None,
@@ -433,7 +507,7 @@ def main() -> None:
             "manifest_id": args.manifest_id,
             "label_strategy": args.label_strategy,
             "excluded_no_support": excluded_no_support,
-            "generator_prompt_version": "evidence_only_v1",
+            "generator_prompt_version": GENERATOR_PROMPT_VERSION,
             "confidence_calibration_output": str(confidence_output),
             "output": str(output_path),
         },

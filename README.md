@@ -12,9 +12,9 @@ OPENAI_API_KEY=your_api_key_here
 
 ## 2) 논문 기본 프로토콜
 
-- 고정 코퍼스 슬라이스: `corpus_split=train`, `doc_start=0`, `doc_limit=20000`
+- 고정 코퍼스 슬라이스: `corpus_split=validation`, `doc_start=0`, `doc_limit=20000`
 - 질의 분할: `query_split=validation`
-- one-step 정책: `k_init=3`, `k_exp=5`, `STOP/EXPAND`
+- one-step 정책: `k_init=3`, `k_exp=8`, `STOP/EXPAND`
 - calibration 기본: `label_strategy=evidence`
 - `query_union` 정책은 사용하지 않음
 
