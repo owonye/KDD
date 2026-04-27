@@ -335,6 +335,17 @@ def min_max_normalize(values: List[float]) -> List[float]:
     return [(value - min_v) / (max_v - min_v) for value in values]
 
 
+def compute_retrieval_confidence(docs: List[RetrievedDocument]) -> float:
+    if not docs:
+        return 0.0
+    raw_scores = [doc.retrieval_score for doc in docs]
+    top1_score = raw_scores[0]
+    top2_score = raw_scores[1] if len(raw_scores) > 1 else top1_score
+    score_gap = max(top1_score - top2_score, 0.0)
+    confidence = 0.8 * top1_score + 0.2 * score_gap
+    return max(0.0, min(1.0, confidence))
+
+
 def compute_query_overlap(query: Query, doc: RetrievedDocument) -> float:
     query_tokens = set(extract_content_tokens(query.text))
     doc_tokens = set(normalize_text(doc.text))

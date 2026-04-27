@@ -17,12 +17,12 @@ from rag.pipeline import (
     build_demo_corpus,
     build_silver_label,
     compute_query_overlap,
+    compute_retrieval_confidence,
     embed_corpus_texts,
     extract_evidence_features,
     GENERATOR_PROMPT_VERSION,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
-    min_max_normalize,
     load_nq_queries,
     load_nq_sample,
 )
@@ -432,13 +432,7 @@ def main() -> None:
         label = build_silver_label(initial_correct, expanded_correct)
         if label is None:
             continue
-        raw_scores = [doc.retrieval_score for doc in initial_docs]
-        norm_scores = min_max_normalize(raw_scores) if raw_scores else []
-        avg_score = sum(norm_scores) / max(len(norm_scores), 1)
-        top1_score = norm_scores[0] if norm_scores else 0.0
-        top2_score = norm_scores[1] if len(norm_scores) > 1 else 0.0
-        score_gap = top1_score - top2_score
-        confidence_score = 0.5 * top1_score + 0.4 * avg_score + 0.1 * score_gap
+        confidence_score = compute_retrieval_confidence(initial_docs)
         confidence_examples.append((confidence_score, label))
         _maybe_log_progress("confidence_labels", idx, total_queries, stage_started)
 
@@ -478,6 +472,7 @@ def main() -> None:
                 "silver_sufficient_total": sufficient_total,
                 "silver_insufficient_total": insufficient_total,
                 "num_examples": len(confidence_examples),
+                "confidence_score_version": "retriever_top1_margin_v1",
                 "label_strategy": args.label_strategy,
                 "manifest_path": args.manifest_path or None,
                 "manifest_id": args.manifest_id,

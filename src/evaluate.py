@@ -20,10 +20,10 @@ from rag.pipeline import (
     SufficiencyEstimator,
     build_demo_corpus,
     compute_query_overlap,
+    compute_retrieval_confidence,
     embed_corpus_texts,
     load_hotpotqa_queries,
     load_hotpotqa_sample,
-    min_max_normalize,
     load_nq_queries,
     load_nq_sample,
 )
@@ -349,13 +349,8 @@ def run_confidence_baseline(
 ) -> dict[str, Any]:
     initial_docs = retriever.retrieve(query, top_k=initial_k)
     raw_scores = [doc.retrieval_score for doc in initial_docs]
-    norm_scores = min_max_normalize(raw_scores) if raw_scores else []
-    avg_score = sum(norm_scores) / max(len(norm_scores), 1)
-    top1_score = norm_scores[0] if norm_scores else 0.0
-    top2_score = norm_scores[1] if len(norm_scores) > 1 else 0.0
-    score_gap = top1_score - top2_score
-
-    confidence_score = 0.5 * top1_score + 0.4 * avg_score + 0.1 * score_gap
+    avg_score = sum(raw_scores) / max(len(raw_scores), 1)
+    confidence_score = compute_retrieval_confidence(initial_docs)
 
     if confidence_score >= threshold:
         answer = generator.generate(query, initial_docs)
