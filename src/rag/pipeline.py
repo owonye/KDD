@@ -6,6 +6,7 @@ import re
 import time
 import hashlib
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from statistics import mean
 from typing import List, Optional, Protocol
@@ -816,6 +817,13 @@ def _chunk_tokens(tokens: List[str], max_tokens: int, stride: int) -> List[List[
     return chunks
 
 
+def _load_nq_stream_slice(start: int, limit: int, split: str):
+    from datasets import load_dataset
+
+    dataset = load_dataset("natural_questions", split=split, streaming=True)
+    return islice(dataset, start, start + limit)
+
+
 def load_nq_sample(
     start: int = 0,
     limit: int = 50,
@@ -823,12 +831,8 @@ def load_nq_sample(
     max_tokens: int = 220,
     stride: int = 110,
 ) -> List[dict]:
-    from datasets import load_dataset
-
-    dataset = load_dataset("natural_questions", split=f"{split}[{start}:{start + limit}]")
-
     raw_docs: List[dict] = []
-    for item_idx, item in enumerate(dataset):
+    for item_idx, item in enumerate(_load_nq_stream_slice(start=start, limit=limit, split=split)):
         absolute_item_idx = start + item_idx
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
         tokens = _extract_nq_document_tokens(item)
@@ -852,11 +856,8 @@ def load_nq_sample(
 
 
 def load_nq_queries(start: int = 0, limit: int = 5, split: str = "validation") -> List[Query]:
-    from datasets import load_dataset
-
-    dataset = load_dataset("natural_questions", split=f"{split}[{start}:{start + limit}]")
     queries: List[Query] = []
-    for local_idx, item in enumerate(dataset):
+    for local_idx, item in enumerate(_load_nq_stream_slice(start=start, limit=limit, split=split)):
         question_text = item["question"]["text"] if isinstance(item["question"], dict) else item["question"]
         answers = _extract_nq_short_answer_texts(item)
         answer_text = answers[0] if answers else None
