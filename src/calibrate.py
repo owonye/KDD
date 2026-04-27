@@ -109,9 +109,6 @@ def resolve_manifest_overrides(args: argparse.Namespace) -> argparse.Namespace:
     args.retrieval_cache_dir = str(manifest.get("retrieval_cache_dir", args.retrieval_cache_dir))
     args.nq_max_tokens = int(manifest.get("nq_max_tokens", args.nq_max_tokens))
     args.nq_stride = int(manifest.get("nq_stride", args.nq_stride))
-    args.expansion_selection_tolerance = float(
-        manifest.get("expansion_selection_tolerance", args.expansion_selection_tolerance)
-    )
     if args.label_strategy == "evidence":
         args.label_strategy = str(manifest.get("label_strategy", args.label_strategy))
     return args
@@ -247,15 +244,6 @@ def main() -> None:
     parser.add_argument("--retrieval-cache-dir", default="results/cache")
     parser.add_argument("--nq-max-tokens", type=int, default=220)
     parser.add_argument("--nq-stride", type=int, default=110)
-    parser.add_argument(
-        "--expansion-selection-tolerance",
-        type=float,
-        default=0.0,
-        help=(
-            "Allow a lower-expansion controller when balanced accuracy is within "
-            "this absolute tolerance of the current best calibration score."
-        ),
-    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--confidence-calibration-out", default="")
@@ -346,8 +334,6 @@ def main() -> None:
     best = None
     best_acc = -1.0
     best_balanced_acc = -1.0
-    strict_best_acc = -1.0
-    strict_best_balanced_acc = -1.0
     wr_grid, wc_grid, ws_grid, wu_grid = get_weight_grid(args.ablate_signal)
     threshold_grid = [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8]
 
@@ -386,28 +372,12 @@ def main() -> None:
         insufficient_recall = insufficient_correct / max(insufficient_total, 1)
         balanced_acc = 0.5 * (sufficient_recall + insufficient_recall)
         expansion_rate = predicted_expansions / max(len(examples), 1)
-        if (
-            balanced_acc > strict_best_balanced_acc
-            or (balanced_acc == strict_best_balanced_acc and acc > strict_best_acc)
-        ):
-            strict_best_acc = acc
-            strict_best_balanced_acc = balanced_acc
         best_expansion_rate = best.get("predicted_expansion_rate", float("inf")) if best else float("inf")
-        better_balanced = balanced_acc > best_balanced_acc
-        better_accuracy_tie = balanced_acc == best_balanced_acc and acc > best_acc
-        lower_expansion_near_tie = (
-            best is not None
-            and args.expansion_selection_tolerance > 0
-            and balanced_acc >= strict_best_balanced_acc - args.expansion_selection_tolerance
-            and acc >= strict_best_acc - args.expansion_selection_tolerance
-            and expansion_rate < best_expansion_rate
-        )
-        exact_lower_expansion_tie = (
-            balanced_acc == best_balanced_acc
-            and acc == best_acc
-            and expansion_rate < best_expansion_rate
-        )
-        if better_balanced or better_accuracy_tie or exact_lower_expansion_tie or lower_expansion_near_tie:
+        if (
+            balanced_acc > best_balanced_acc
+            or (balanced_acc == best_balanced_acc and acc > best_acc)
+            or (balanced_acc == best_balanced_acc and acc == best_acc and expansion_rate < best_expansion_rate)
+        ):
             best_acc = acc
             best_balanced_acc = balanced_acc
             best = {
@@ -423,7 +393,6 @@ def main() -> None:
                 "silver_sufficient_total": sufficient_total,
                 "silver_insufficient_total": insufficient_total,
                 "predicted_expansion_rate": expansion_rate,
-                "expansion_selection_tolerance": args.expansion_selection_tolerance,
                 "num_examples": len(examples),
                 "excluded_no_support": excluded_no_support,
                 "weak_support_overlap_threshold": args.weak_support_overlap_threshold,
