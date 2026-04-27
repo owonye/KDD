@@ -762,23 +762,75 @@ def _extract_nq_document_tokens(item: dict) -> List[str]:
 def _extract_nq_short_answer_texts(item: dict) -> List[str]:
     annotations = item.get("annotations")
     candidate_answers: List[dict] = []
+    yes_no_answers: List[str] = []
+
+    def iter_nested_values(raw):
+        if isinstance(raw, list):
+            for value in raw:
+                yield from iter_nested_values(value)
+            return
+        yield raw
+
+    def collect_text_values(raw) -> List[str]:
+        values: List[str] = []
+        for value in iter_nested_values(raw):
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        return values
+
+    def collect_int_values(raw) -> List[int]:
+        values: List[int] = []
+        for value in iter_nested_values(raw):
+            if isinstance(value, int) and not isinstance(value, bool):
+                values.append(value)
+        return values
+
+    def collect_short_answers(raw) -> None:
+        if isinstance(raw, dict):
+            added = False
+            for answer_text in collect_text_values(raw.get("text", [])):
+                candidate_answers.append({"text": answer_text})
+                added = True
+
+            starts = collect_int_values(raw.get("start_token", []))
+            ends = collect_int_values(raw.get("end_token", []))
+            for start_token, end_token in zip(starts, ends):
+                if end_token > start_token:
+                    candidate_answers.append(
+                        {"start_token": start_token, "end_token": end_token}
+                    )
+                    added = True
+
+            if not added:
+                for value in raw.values():
+                    collect_short_answers(value)
+            return
+        if isinstance(raw, list):
+            for value in raw:
+                collect_short_answers(value)
+
+    def collect_yes_no(raw) -> None:
+        if isinstance(raw, str):
+            normalized = raw.strip().lower()
+            if normalized in {"yes", "no"}:
+                yes_no_answers.append(normalized)
+            return
+        if isinstance(raw, list):
+            for value in raw:
+                collect_yes_no(value)
 
     if isinstance(annotations, dict):
-        raw = annotations.get("short_answers", [])
-        if isinstance(raw, list):
-            candidate_answers.extend([answer for answer in raw if isinstance(answer, dict)])
+        collect_short_answers(annotations.get("short_answers", []))
+        collect_yes_no(annotations.get("yes_no_answer", []))
     elif isinstance(annotations, list):
         for annotation in annotations:
             if not isinstance(annotation, dict):
                 continue
-            raw = annotation.get("short_answers", [])
-            if isinstance(raw, list):
-                candidate_answers.extend([answer for answer in raw if isinstance(answer, dict)])
+            collect_short_answers(annotation.get("short_answers", []))
+            collect_yes_no(annotation.get("yes_no_answer", []))
 
-    if not candidate_answers:
-        return []
+    outputs: List[str] = list(yes_no_answers)
 
-    outputs: List[str] = []
     for answer in candidate_answers:
         answer_text = answer.get("text")
         if isinstance(answer_text, str) and answer_text.strip():
