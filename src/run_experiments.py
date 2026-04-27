@@ -76,6 +76,7 @@ def main() -> None:
     parser.add_argument("--expanded-k", type=int, default=5)
     parser.add_argument("--confidence-threshold", type=float, default=0.88)
     parser.add_argument("--weak-support-overlap-threshold", type=float, default=0.2)
+    parser.add_argument("--expansion-selection-tolerance", type=float, default=0.0)
     parser.add_argument("--label-strategy", choices=["evidence", "hybrid_generation"], default="evidence")
     parser.add_argument("--calib-query-start", type=int, default=None)
     parser.add_argument("--calib-query-limit", type=int, default=None)
@@ -164,6 +165,7 @@ def main() -> None:
                 "initial_k": args.initial_k,
                 "expanded_k": args.expanded_k,
                 "label_strategy": args.label_strategy,
+                "expansion_selection_tolerance": args.expansion_selection_tolerance,
                 "embedding_model": args.embedding_model,
                 "nq_max_tokens": args.nq_max_tokens,
                 "nq_stride": args.nq_stride,
@@ -210,6 +212,8 @@ def main() -> None:
             str(args.expanded_k),
             "--weak-support-overlap-threshold",
             str(args.weak_support_overlap_threshold),
+            "--expansion-selection-tolerance",
+            str(args.expansion_selection_tolerance),
             "--label-strategy",
             args.label_strategy,
             "--seed",
@@ -328,6 +332,8 @@ def main() -> None:
                     str(args.expanded_k),
                     "--weak-support-overlap-threshold",
                     str(args.weak_support_overlap_threshold),
+                    "--expansion-selection-tolerance",
+                    str(args.expansion_selection_tolerance),
                     "--label-strategy",
                     args.label_strategy,
                     "--ablate-signal",

@@ -788,18 +788,23 @@ def _extract_nq_short_answer_texts(item: dict) -> List[str]:
     def collect_short_answers(raw) -> None:
         if isinstance(raw, dict):
             added = False
-            for answer_text in collect_text_values(raw.get("text", [])):
+            text_values = collect_text_values(raw.get("text", []))
+            for answer_text in text_values:
                 candidate_answers.append({"text": answer_text})
                 added = True
 
-            starts = collect_int_values(raw.get("start_token", []))
-            ends = collect_int_values(raw.get("end_token", []))
-            for start_token, end_token in zip(starts, ends):
-                if end_token > start_token:
-                    candidate_answers.append(
-                        {"start_token": start_token, "end_token": end_token}
-                    )
-                    added = True
+            # Prefer the dataset-provided answer text. Token offsets are a
+            # fallback only because NQ offsets refer to the original token
+            # stream and can drift after HTML-token filtering.
+            if not text_values:
+                starts = collect_int_values(raw.get("start_token", []))
+                ends = collect_int_values(raw.get("end_token", []))
+                for start_token, end_token in zip(starts, ends):
+                    if end_token > start_token:
+                        candidate_answers.append(
+                            {"start_token": start_token, "end_token": end_token}
+                        )
+                        added = True
 
             if not added:
                 for value in raw.values():
