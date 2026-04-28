@@ -419,9 +419,14 @@ def main() -> None:
 
     # Confidence baseline calibration from the same silver labels.
     confidence_best = None
-    confidence_best_acc = -1.0
+    confidence_fallback_best = None
     confidence_best_balanced_acc = -1.0
+    confidence_best_acc = -1.0
+    confidence_fallback_objective = -1.0
     confidence_threshold_grid = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    confidence_target_min_expansion = 0.2
+    confidence_target_max_expansion = 0.6
+    confidence_fallback_expansion_penalty = 0.02
     confidence_examples = []
     stage_started = time.time()
     for idx, query in enumerate(queries, start=1):
@@ -442,6 +447,7 @@ def main() -> None:
         insufficient_total = 0
         sufficient_correct = 0
         insufficient_correct = 0
+        predicted_expansions = 0
         for score, label in confidence_examples:
             prediction = 1 if score >= threshold else 0
             if prediction == label:
@@ -454,32 +460,53 @@ def main() -> None:
                 insufficient_total += 1
                 if prediction == label:
                     insufficient_correct += 1
+            if prediction == 0:
+                predicted_expansions += 1
         acc = correct / max(len(confidence_examples), 1)
         sufficient_recall = sufficient_correct / max(sufficient_total, 1)
         insufficient_recall = insufficient_correct / max(insufficient_total, 1)
         balanced_acc = 0.5 * (sufficient_recall + insufficient_recall)
-        if balanced_acc > confidence_best_balanced_acc or (
-            balanced_acc == confidence_best_balanced_acc and acc > confidence_best_acc
+        expansion_rate = predicted_expansions / max(len(confidence_examples), 1)
+        candidate = {
+            "threshold": threshold,
+            "silver_accuracy": acc,
+            "silver_balanced_accuracy": balanced_acc,
+            "silver_sufficient_recall": sufficient_recall,
+            "silver_insufficient_recall": insufficient_recall,
+            "silver_sufficient_total": sufficient_total,
+            "silver_insufficient_total": insufficient_total,
+            "predicted_expansion_rate": expansion_rate,
+            "confidence_target_min_expansion": confidence_target_min_expansion,
+            "confidence_target_max_expansion": confidence_target_max_expansion,
+            "confidence_score_version": "retriever_top1_margin_v1",
+            "label_strategy": args.label_strategy,
+            "manifest_path": args.manifest_path or None,
+            "manifest_id": args.manifest_id,
+            "initial_k": args.initial_k,
+            "expanded_k": args.expanded_k,
+            "retrieval_cache_dir": args.retrieval_cache_dir,
+        }
+        in_target_range = confidence_target_min_expansion <= expansion_rate <= confidence_target_max_expansion
+        if in_target_range and (
+            balanced_acc > confidence_best_balanced_acc
+            or (balanced_acc == confidence_best_balanced_acc and acc > confidence_best_acc)
         ):
-            confidence_best_acc = acc
             confidence_best_balanced_acc = balanced_acc
-            confidence_best = {
-                "threshold": threshold,
-                "silver_accuracy": acc,
-                "silver_balanced_accuracy": balanced_acc,
-                "silver_sufficient_recall": sufficient_recall,
-                "silver_insufficient_recall": insufficient_recall,
-                "silver_sufficient_total": sufficient_total,
-                "silver_insufficient_total": insufficient_total,
-                "num_examples": len(confidence_examples),
-                "confidence_score_version": "retriever_top1_margin_v1",
-                "label_strategy": args.label_strategy,
-                "manifest_path": args.manifest_path or None,
-                "manifest_id": args.manifest_id,
-                "initial_k": args.initial_k,
-                "expanded_k": args.expanded_k,
-                "retrieval_cache_dir": args.retrieval_cache_dir,
+            confidence_best_acc = acc
+            confidence_best = {**candidate, "confidence_selection": "target_range"}
+
+        fallback_objective = balanced_acc - confidence_fallback_expansion_penalty * expansion_rate
+        if fallback_objective > confidence_fallback_objective:
+            confidence_fallback_objective = fallback_objective
+            confidence_fallback_best = {
+                **candidate,
+                "confidence_selection": "fallback_penalized",
+                "confidence_objective": fallback_objective,
+                "confidence_expansion_penalty": confidence_fallback_expansion_penalty,
             }
+
+    if confidence_best is None:
+        confidence_best = confidence_fallback_best
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
