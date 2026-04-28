@@ -61,3 +61,8 @@ hf_cache/
 gpu_bundle/
 gpu_bundle.zip
 gpu_bundle.tar.gz
+
+# Local plot outputs
+rag_plot.py
+rag_tradeoff.pdf
+rag_tradeoff.png
