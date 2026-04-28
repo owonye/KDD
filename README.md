@@ -1,75 +1,207 @@
-# KDD Adaptive RAG Experiments
+# STAR: Structure-Aware Adaptive Retrieval for RAG
 
-논문 기본 프로토콜 기준으로 실행하는 실험 코드입니다.
+This repository contains the experimental code for **STAR**, a structure-aware adaptive retrieval controller for retrieval-augmented generation (RAG). STAR decides whether to answer from the initially retrieved evidence or perform one additional retrieval step by diagnosing the current evidence set with four lightweight signals:
 
-## 1) 환경 변수
+- retrieval relevance
+- redundancy
+- coverage
+- supportiveness
 
-프로젝트 루트에 `.env`:
+The main experiments compare STAR against Vanilla RAG, Fixed larger-k RAG, and a confidence-based adaptive retrieval baseline on HotpotQA and Natural Questions.
 
-```dotenv
-OPENAI_API_KEY=your_api_key_here
+## Repository Layout
+
+```text
+src/
+  calibrate.py                 # Calibrates STAR and confidence thresholds
+  evaluate.py                  # Runs RAG baselines and computes EM/F1
+  extract_case_analysis.py     # Extracts representative disagreement cases
+  summarize_results.py         # Prints baseline summaries from evaluation CSVs
+  summarize_failure_modes.py   # Aggregates STAR-vs-confidence failure modes
+  run_experiments.py           # End-to-end experiment runner
+  rag/                         # Retrieval, signal, and generation utilities
+
+scripts/
+  plot_tradeoff.py             # Regenerates the quality-cost figure
+  run_hotpotqa_smoke.sh        # Small smoke-test runner
+
+assets/
+  rag_tradeoff.png             # Quality-cost figure used in the paper
+  rag_tradeoff.pdf             # Vector version of the same figure
 ```
 
-## 2) 논문 기본 프로토콜
+## Setup
 
-- 고정 코퍼스 슬라이스: `corpus_split=validation`, `doc_start=0`, `doc_limit=20000`
-- 질의 분할: `query_split=validation`
-- one-step 정책: `k_init=3`, `k_exp=8`, `STOP/EXPAND`
-- calibration 기본: `label_strategy=evidence`
-- `query_union` 정책은 사용하지 않음
+Create a virtual environment and install dependencies:
 
-## 3) 메인 실행
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+For paper-grade generation, set an OpenAI API key:
+
+```bash
+export OPENAI_API_KEY=your_api_key_here
+```
+
+On Windows PowerShell:
 
 ```powershell
-# HotpotQA: 100/300/1000, 메인+ablation
-python src/run_experiments.py --mode hotpotqa --sizes 100,300,1000 --paper-defaults --use-openai --run-ablation
-
-# Natural Questions: 100/300/1000, 메인+ablation
-python src/run_experiments.py --mode nq --sizes 100,300,1000 --paper-defaults --use-openai --run-ablation
+$env:OPENAI_API_KEY="your_api_key_here"
 ```
 
-## 4) 캐시 (속도 최적화)
+You can also place the key in a local `.env` file. `.env` is ignored by git.
 
-기본값으로 retrieval 캐시가 켜져 있습니다.
+## Main Experimental Protocol
 
-- 캐시 루트: `results/cache`
-- 임베딩 캐시: `results/cache/embeddings/*.npz`
-- FAISS 인덱스 캐시: `results/cache/faiss/*.index`
-- 키 기준: `dataset + corpus_split + doc_range + embedding_model`
+The paper uses:
 
-동일한 코퍼스 범위로 반복 실행하면 임베딩/인덱스 재계산을 대부분 건너뜁니다.
+- generator: `gpt-4.1-mini`
+- prompt version: `short_answer_v2`
+- dense encoder: `BAAI/bge-small-en-v1.5`
+- corpus split: `validation`
+- query split: `validation`
+- document slice: `doc_start=0`, `doc_limit=20000`
+- initial retrieval budget: `k_init=3`
+- label strategy: `evidence`
+- seed: `42`
 
-캐시 경로 변경:
+For a size of 1,000, `run_experiments.py` uses disjoint query slices by default:
 
-```powershell
-python src/run_experiments.py --mode hotpotqa --sizes 300 --paper-defaults --use-openai --retrieval-cache-dir results/cache
+- calibration: query indices `0--999`
+- evaluation: query indices `1000--1999`
+
+Overlapping calibration/evaluation slices are rejected unless `--allow-overlap-splits` is explicitly set.
+
+## Reproducing the Main Runs
+
+### HotpotQA 1000 with Full Ablation
+
+```bash
+python src/run_experiments.py \
+  --mode hotpotqa \
+  --sizes 1000 \
+  --doc-limit 20000 \
+  --corpus-split validation \
+  --query-split validation \
+  --initial-k 3 \
+  --expanded-k 8 \
+  --label-strategy evidence \
+  --use-openai \
+  --run-ablation \
+  --use-run-subdir \
+  --run-name hotpot-v2-conf-target-final-ablation-1000-clean \
+  --retrieval-cache-dir results/cache_shared \
+  --openai-cache-path results/openai_cache_shared.jsonl
 ```
 
-## 5) 출력 파일
+### Natural Questions 1000 with Full Ablation
 
-- manifest: `results/manifest_<mode>_<size>.json`
-- 구조형 calibration: `results/calib_<mode>_<size>.json`
-- confidence calibration: `results/confidence_calib_<mode>_<size>.json`
-- 평가 CSV: `results/eval_<mode>_<size>.csv`
-- ablation calibration/eval:
-  - `results/calib_<mode>_<size>_wo_<signal>.json`
-  - `results/eval_<mode>_<size>_wo_<signal>.csv`
-- ablation 요약: `results/ablation_summary_<mode>_<size>.csv`
-- case analysis: `results/case_analysis_<mode>_<size>.csv`
-- 실행 메타: `results/*.meta.json`
-
-## 6) 선택 옵션
-
-`hybrid_generation`은 sensitivity check 용도(비용/시간 증가):
-
-```powershell
-python src/run_experiments.py --mode hotpotqa --sizes 100 --paper-defaults --use-openai --label-strategy hybrid_generation
+```bash
+python src/run_experiments.py \
+  --mode nq \
+  --sizes 1000 \
+  --doc-limit 20000 \
+  --corpus-split validation \
+  --query-split validation \
+  --initial-k 3 \
+  --expanded-k 5 \
+  --nq-max-tokens 180 \
+  --nq-stride 90 \
+  --label-strategy evidence \
+  --use-openai \
+  --run-ablation \
+  --use-run-subdir \
+  --run-name nq-v2-k5-chunk180-conf-target-final-ablation-1000-clean \
+  --retrieval-cache-dir results/cache_shared \
+  --openai-cache-path results/openai_cache_shared.jsonl
 ```
 
-## 7) 참고
+The shared retrieval and OpenAI caches are optional but useful for repeated runs.
 
-비용/시간을 줄이려면:
+## Summarizing Results
 
-- 먼저 `--sizes 100`으로 calibration/동작 확인
-- 이후 `300`, `1000` 순서로 확대
-- 같은 `doc_start/doc_limit/split/model`을 유지해 캐시 적중률 확보
+After a run finishes, summarize the latest matching output directory.
+
+### HotpotQA
+
+```bash
+HOTPOT_DIR=$(ls -td results/*hotpot-v2-conf-target-final-ablation-1000-clean* | head -1)
+
+python src/summarize_results.py \
+  --input "$HOTPOT_DIR"/eval_hotpotqa_1000.csv
+
+cat "$HOTPOT_DIR"/ablation_summary_hotpotqa_1000.csv
+head -5 "$HOTPOT_DIR"/case_analysis_hotpotqa_1000.csv
+```
+
+### Natural Questions
+
+```bash
+NQ_DIR=$(ls -td results/*nq-v2-k5-chunk180-conf-target-final-ablation-1000-clean* | head -1)
+
+python src/summarize_results.py \
+  --input "$NQ_DIR"/eval_nq_1000.csv
+
+cat "$NQ_DIR"/ablation_summary_nq_1000.csv
+head -5 "$NQ_DIR"/case_analysis_nq_1000.csv
+```
+
+## Failure-Mode Analysis
+
+The paper includes an aggregate analysis of cases where the confidence baseline stops but STAR expands.
+
+```bash
+python src/summarize_failure_modes.py \
+  --input "$HOTPOT_DIR"/eval_hotpotqa_1000.csv \
+  --output "$HOTPOT_DIR"/failure_modes_hotpotqa_1000.csv
+
+python src/summarize_failure_modes.py \
+  --input "$NQ_DIR"/eval_nq_1000.csv \
+  --output "$NQ_DIR"/failure_modes_nq_1000.csv
+```
+
+The script reports:
+
+- confidence premature stops
+- STAR premature stops
+- premature stops corrected by STAR
+- confidence STOP / STAR EXPAND cases
+- breakdowns by STAR reason, such as `high_redundancy` and `mixed_insufficiency`
+
+## Regenerating the Quality-Cost Figure
+
+The figure in `assets/rag_tradeoff.png` is generated from the paper table values:
+
+```bash
+python scripts/plot_tradeoff.py
+```
+
+This creates:
+
+- `assets/rag_tradeoff.png`
+- `assets/rag_tradeoff.pdf`
+
+## Output Files
+
+Each run writes artifacts under `results/`, typically including:
+
+- `manifest_<dataset>_<size>.json`
+- `calib_<dataset>_<size>.json`
+- `confidence_calib_<dataset>_<size>.json`
+- `eval_<dataset>_<size>.csv`
+- `ablation_summary_<dataset>_<size>.csv`
+- `case_analysis_<dataset>_<size>.csv`
+- `failure_modes_<dataset>_<size>.csv` when generated
+- sidecar `*.meta.json` files
+
+The metadata files record the generator, prompt version, embedding model, calibration source, retrieval cache path, OpenAI cache path, and related run configuration.
+
+## Notes
+
+- Paper-grade runs require `--use-openai`.
+- `--allow-simple-generator` is available only for lightweight debugging.
+- `label_strategy=hybrid_generation` is supported as an optional sensitivity mode, but the default paper setting is `label_strategy=evidence`.
+- The experiments are intentionally controlled: retrieval uses slice-based benchmark corpora and a one-step STOP/EXPAND policy.
